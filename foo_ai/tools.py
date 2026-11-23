@@ -1,298 +1,481 @@
-"""Workspace tools advertised to the model as OpenAI function definitions."""
+"""The six built-in tools."""
 
 from __future__ import annotations
 
 import difflib
 import json
+import locale
 import os
 import re
 import subprocess
-from collections.abc import Callable
 from pathlib import Path
 
-READ_DEFAULT_LIMIT = 400
-READ_MAX_LIMIT = 2000
-GREP_MAX_MATCHES = 50
-TOOL_OUTPUT_LIMIT = 20000
+TOOL_NAMES = ("read_file", "list_dir", "grep", "write_file", "edit_file", "shell")
+
 SHELL_TIMEOUT_SECONDS = 120
-DIFF_MAX_LINES = 80
+RESULT_LIMIT = 20_000
+_GREP_SKIP = {".git", ".venv", "venv", "__pycache__", "node_modules", ".foo-ai"}
 
-ApproveShell = Callable[[str], bool]
-
-SKIP_DIRS = {".git", ".venv", "venv", "__pycache__", "node_modules", ".foo-ai"}
-
-
-def tool_schemas() -> list[dict]:
-    return [
-        _function(
-            "read_file",
-            "Read a UTF-8 text file in the workspace. Lines are numbered from 1. Use offset and limit to page through long files.",
-            {
-                "path": {"type": "string", "description": "File path relative to the workspace."},
-                "offset": {"type": "integer", "minimum": 1, "description": "1-based first line to return. Default 1."},
-                "limit": {"type": "integer", "minimum": 1, "description": f"Maximum lines to return. Default {READ_DEFAULT_LIMIT}."},
+TOOL_SCHEMAS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "read_file",
+            "description": (
+                "Read a UTF-8 text file in the workspace. Lines are numbered from 1. "
+                "Use offset and limit to page through long files."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "File path relative to the workspace."},
+                    "offset": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "description": "1-based first line to return. Default 1.",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "description": "Maximum lines to return. Default 400.",
+                    },
+                },
+                "required": ["path"],
             },
-            ["path"],
-        ),
-        _function(
-            "list_dir",
-            "List entries in a workspace directory. Pass '.' for the workspace root.",
-            {"path": {"type": "string", "description": "Directory relative to the workspace. Default '.'."}},
-            [],
-        ),
-        _function(
-            "grep",
-            "Search workspace text files for a Python regular expression. Returns path:line:text matches.",
-            {
-                "pattern": {"type": "string", "description": "Regular expression."},
-                "path": {"type": "string", "description": "File or directory to search. Default workspace root."},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_dir",
+            "description": "List entries in a workspace directory. Pass '.' for the workspace root.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Directory relative to the workspace. Default '.'.",
+                    }
+                },
             },
-            ["pattern"],
-        ),
-        _function(
-            "write_file",
-            "Create a new UTF-8 text file inside the workspace. Fails if the file already exists; use edit_file to change an existing file.",
-            {
-                "path": {"type": "string", "description": "File path relative to the workspace."},
-                "content": {"type": "string", "description": "Full file contents."},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "grep",
+            "description": "Search workspace text files for a Python regular expression. Returns path:line:text matches.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "pattern": {"type": "string", "description": "Regular expression."},
+                    "path": {
+                        "type": "string",
+                        "description": "File or directory to search. Default workspace root.",
+                    },
+                },
+                "required": ["pattern"],
             },
-            ["path", "content"],
-        ),
-        _function(
-            "edit_file",
-            "Replace one exact occurrence of old_string with new_string in an existing file. old_string is raw file text, without the line-number prefix shown by read_file. Fails if old_string is missing or matches more than once; add surrounding lines to disambiguate.",
-            {
-                "path": {"type": "string", "description": "File path relative to the workspace."},
-                "old_string": {"type": "string", "description": "Exact text to replace. Must match once."},
-                "new_string": {"type": "string", "description": "Replacement text. An empty string deletes the match."},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "write_file",
+            "description": (
+                "Create a new UTF-8 text file inside the workspace. "
+                "Fails if the file already exists; use edit_file to change an existing file."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "File path relative to the workspace."},
+                    "content": {"type": "string", "description": "Full file contents."},
+                },
+                "required": ["path", "content"],
             },
-            ["path", "old_string", "new_string"],
-        ),
-        _function(
-            "shell",
-            "Run a command in the workspace and return combined stdout and stderr. The user must approve the command before it runs. Prefer read_file, list_dir, grep, and edit_file for file work.",
-            {"command": {"type": "string", "description": "Command to execute."}},
-            ["command"],
-        ),
-    ]
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "edit_file",
+            "description": (
+                "Replace one exact occurrence of old_string with new_string in an existing file. "
+                "old_string is raw file text, without the line-number prefix shown by read_file. "
+                "Fails if old_string is missing or matches more than once; add surrounding lines to disambiguate."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "File path relative to the workspace."},
+                    "old_string": {"type": "string", "description": "Exact text to replace. Must match once."},
+                    "new_string": {
+                        "type": "string",
+                        "description": "Replacement text. An empty string deletes the match.",
+                    },
+                },
+                "required": ["path", "old_string", "new_string"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "shell",
+            "description": (
+                "Run a command in the workspace and return combined stdout and stderr. "
+                "The user must approve the command before it runs. "
+                "Prefer read_file, list_dir, grep, and edit_file for file work."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "command": {"type": "string", "description": "Command to execute."}
+                },
+                "required": ["command"],
+            },
+        },
+    },
+]
 
 
-def run_tool(name: str, arguments: str | dict, workspace: Path, approve_shell: ApproveShell | None = None) -> str:
+def parse_arguments(raw: object, *, mcp: bool = False) -> dict | str:
+    if isinstance(raw, dict):
+        return raw
+    if raw is None or (isinstance(raw, str) and raw.strip() == ""):
+        return {}
+    if not isinstance(raw, str):
+        return "error: arguments are not JSON (arguments must be a JSON object: line 1 column 1 (char 0))"
     try:
-        args = _arguments(arguments)
+        value = json.loads(raw)
     except json.JSONDecodeError as exc:
         return f"error: arguments are not JSON ({exc})"
+    if isinstance(value, dict):
+        return value
+    if mcp:
+        return "error: arguments must be a JSON object"
+    return "error: arguments are not JSON (arguments must be a JSON object: line 1 column 1 (char 0))"
+
+
+def cap_result(result: str) -> str:
+    if len(result) > RESULT_LIMIT:
+        return result[:RESULT_LIMIT] + "\n…[truncated]"
+    return result
+
+
+def _stop_process(proc: subprocess.Popen) -> None:
+    if os.name == "nt":
+        subprocess.run(
+            ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+            capture_output=True,
+            stdin=subprocess.DEVNULL,
+        )
     try:
-        if name == "read_file":
-            text = _read_file(workspace, args)
-        elif name == "list_dir":
-            text = _list_dir(workspace, args)
-        elif name == "grep":
-            text = _grep(workspace, args)
-        elif name == "write_file":
-            text = _write_file(workspace, args)
-        elif name == "edit_file":
-            text = _edit_file(workspace, args)
-        elif name == "shell":
-            text = _shell(workspace, args, approve_shell)
-        else:
-            text = f"error: unknown tool {name!r}"
-    except Exception as exc:
-        text = f"error: {exc}"
-    if len(text) > TOOL_OUTPUT_LIMIT:
-        text = text[:TOOL_OUTPUT_LIMIT] + "\n…[truncated]"
-    return text
+        proc.kill()
+    except OSError:
+        pass
 
 
-def workspace_path(workspace: Path, raw: str) -> Path:
-    root = workspace.resolve()
-    relative = raw.strip() or "."
-    path = (root / relative).resolve()
-    if path != root and root not in path.parents:
-        raise ValueError(f"path escapes the workspace: {raw}")
-    return path
-
-
-def _function(name: str, description: str, properties: dict, required: list[str]) -> dict:
-    schema: dict = {"type": "object", "properties": properties}
-    if required:
-        schema["required"] = required
-    return {
-        "type": "function",
-        "function": {"name": name, "description": description, "parameters": schema},
-    }
-
-
-def _arguments(arguments: str | dict) -> dict:
-    if isinstance(arguments, dict):
-        return arguments
-    if not arguments or not str(arguments).strip():
-        return {}
-    parsed = json.loads(arguments)
-    if not isinstance(parsed, dict):
-        raise json.JSONDecodeError("arguments must be a JSON object", str(arguments), 0)
-    return parsed
-
-
-def _read_file(workspace: Path, args: dict) -> str:
-    path = workspace_path(workspace, _required(args, "path"))
-    if not path.is_file():
-        raise FileNotFoundError(f"not a file: {path.name}")
-    offset = max(int(args.get("offset") or 1), 1)
-    limit = int(args.get("limit") or READ_DEFAULT_LIMIT)
-    limit = min(max(limit, 1), READ_MAX_LIMIT)
-    lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
-    window = lines[offset - 1 : offset - 1 + limit]
-    numbered = [f"{offset + index}|{line}" for index, line in enumerate(window)]
-    footer = f"\n[{len(window)} lines shown, {len(lines)} total]"
-    return ("\n".join(numbered) + footer) if numbered else f"[empty file, {len(lines)} total]"
-
-
-def _list_dir(workspace: Path, args: dict) -> str:
-    path = workspace_path(workspace, str(args.get("path") or "."))
-    if not path.is_dir():
-        raise NotADirectoryError(f"not a directory: {path.name}")
-    entries = []
-    for child in sorted(path.iterdir(), key=lambda item: (not item.is_dir(), item.name.lower())):
-        suffix = "/" if child.is_dir() else ""
-        entries.append(child.name + suffix)
-    return "\n".join(entries) if entries else "[empty directory]"
-
-
-def _grep(workspace: Path, args: dict) -> str:
-    pattern = _required(args, "pattern")
-    regex = re.compile(pattern)
-    start = workspace_path(workspace, str(args.get("path") or "."))
-    files = [start] if start.is_file() else _text_files(start)
-    matches: list[str] = []
-    for file in files:
-        try:
-            text = file.read_text(encoding="utf-8", errors="replace")
-        except OSError:
-            continue
-        for number, line in enumerate(text.splitlines(), start=1):
-            if regex.search(line):
-                relative = file.relative_to(workspace.resolve())
-                matches.append(f"{relative}:{number}:{line}")
-                if len(matches) >= GREP_MAX_MATCHES:
-                    return "\n".join(matches) + "\n…[match limit reached]"
-    return "\n".join(matches) if matches else "[no matches]"
-
-
-def _write_file(workspace: Path, args: dict) -> str:
-    path = workspace_path(workspace, _required(args, "path"))
-    if "content" not in args:
-        raise ValueError("content is required")
-    if path.exists():
-        raise FileExistsError("file exists; use edit_file to change it")
-    content = str(args["content"])
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(content, encoding="utf-8", newline="\n")
-    relative = path.relative_to(workspace.resolve())
-    return _with_diff(f"wrote {relative.as_posix()} ({path.stat().st_size} bytes)", workspace, path, "", content)
-
-
-def _edit_file(workspace: Path, args: dict) -> str:
-    path = workspace_path(workspace, _required(args, "path"))
-    if not path.is_file():
-        raise FileNotFoundError(f"not a file: {path.name}")
-    old = args.get("old_string")
-    if not isinstance(old, str) or old == "":
-        raise ValueError("old_string is required")
-    if "new_string" not in args:
-        raise ValueError("new_string is required")
-    new = args.get("new_string")
-    if not isinstance(new, str):
-        raise ValueError("new_string must be a string")
-    if old == new:
-        raise ValueError("old_string and new_string are the same")
-    before = _read_preserving_newlines(path)
-    after = _replace_once(before, old, new)
-    _write_preserving_newlines(path, after)
-    relative = path.relative_to(workspace.resolve())
-    return _with_diff(f"edited {relative.as_posix()}", workspace, path, before, after)
-
-
-def _read_preserving_newlines(path: Path) -> str:
-    # Path.read_text(newline=) requires Python 3.13. open() keeps CRLF on 3.11.
-    with path.open(encoding="utf-8", newline="") as handle:
-        return handle.read()
-
-
-def _write_preserving_newlines(path: Path, text: str) -> None:
-    with path.open("w", encoding="utf-8", newline="") as handle:
-        handle.write(text)
-
-
-def _replace_once(text: str, old: str, new: str) -> str:
-    count = text.count(old)
-    # read_file shows logical lines, so the model sends \n. Match a CRLF file once.
-    if count == 0 and "\r\n" in text and "\n" in old and "\r" not in old:
-        return _replace_once(text, old.replace("\n", "\r\n"), new.replace("\n", "\r\n"))
-    if count == 0:
-        raise ValueError("old_string not found")
-    if count > 1:
-        raise ValueError(f"old_string matched {count} times; add surrounding context")
-    return text.replace(old, new, 1)
-
-
-def _with_diff(header: str, workspace: Path, path: Path, before: str, after: str) -> str:
-    diff = _unified(workspace, path, before, after)
-    return f"{header}\n{diff}" if diff else header
-
-
-def _unified(workspace: Path, path: Path, before: str, after: str) -> str:
-    relative = path.relative_to(workspace.resolve()).as_posix()
-    lines = list(
+def _unified(old_lines: list[str], new_lines: list[str], posix_path: str) -> str:
+    diff = list(
         difflib.unified_diff(
-            before.splitlines(),
-            after.splitlines(),
-            fromfile=f"a/{relative}",
-            tofile=f"b/{relative}",
+            old_lines,
+            new_lines,
+            fromfile=f"a/{posix_path}",
+            tofile=f"b/{posix_path}",
             lineterm="",
         )
     )
-    if len(lines) > DIFF_MAX_LINES:
-        hidden = len(lines) - DIFF_MAX_LINES
-        lines = lines[:DIFF_MAX_LINES]
-        lines.append(f"…[{hidden} diff lines omitted]")
-    return "\n".join(lines)
+    if not diff:
+        return ""
+    if len(diff) > 80:
+        hidden = len(diff) - 80
+        return "\n".join(diff[:80]) + f"\n…[{hidden} diff lines omitted]"
+    return "\n".join(diff)
 
 
-def _shell(workspace: Path, args: dict, approve_shell: ApproveShell | None) -> str:
-    command = _required(args, "command")
-    if approve_shell is not None and not approve_shell(command):
-        return "error: command not approved"
-    completed = subprocess.run(
-        command,
-        shell=True,
-        cwd=workspace,
-        capture_output=True,
-        text=True,
-        timeout=SHELL_TIMEOUT_SECONDS,
-        env=os.environ.copy(),
-    )
-    output = (completed.stdout or "") + (completed.stderr or "")
-    output = output.rstrip()
-    status = f"\n[exit {completed.returncode}]"
-    return (output + status) if output else status.strip()
+class Toolbox:
+    def __init__(self, workspace: Path, confirm, mcp=None):
+        self.workspace = workspace.resolve()
+        self.confirm = confirm
+        self.mcp = mcp
+
+    def schemas(self) -> list[dict]:
+        extra = self.mcp.schemas() if self.mcp is not None else []
+        return [*TOOL_SCHEMAS, *extra]
+
+    def run(self, name: str, raw: object) -> str:
+        try:
+            if name == "read_file":
+                result = self._read_file(raw)
+            elif name == "list_dir":
+                result = self._list_dir(raw)
+            elif name == "grep":
+                result = self._grep(raw)
+            elif name == "write_file":
+                result = self._write_file(raw)
+            elif name == "edit_file":
+                result = self._edit_file(raw)
+            elif name == "shell":
+                result = self._shell(raw)
+            elif self.mcp is not None and self.mcp.knows(name):
+                result = self.mcp.call(name, raw)
+            else:
+                result = f"error: unknown tool {name!r}"
+        except Exception as exc:
+            result = f"error: {exc}"
+        return cap_result(result)
+
+    def _resolve(self, raw: object) -> Path | str:
+        original = raw if isinstance(raw, str) else ""
+        stripped = original.strip()
+        relative = stripped if stripped else "."
+        candidate = (self.workspace / relative).resolve()
+        try:
+            candidate.relative_to(self.workspace)
+        except ValueError:
+            return f"error: path escapes the workspace: {original}"
+        return candidate
+
+    def _read_file(self, raw: object) -> str:
+        args = parse_arguments(raw)
+        if isinstance(args, str):
+            return args
+        resolved = self._resolve(args.get("path", ""))
+        if isinstance(resolved, str):
+            return resolved
+        if not resolved.is_file():
+            return f"error: not a file: {_final_name(args.get('path', ''), resolved)}"
+        text = resolved.read_text(encoding="utf-8", errors="replace")
+        lines = text.splitlines()
+        offset = _offset(args.get("offset"))
+        limit = _limit(args.get("limit"))
+        window = lines[offset - 1 : offset - 1 + limit]
+        total = len(lines)
+        if not window:
+            return f"[empty file, {total} total]"
+        body = "\n".join(f"{offset + index}|{line}" for index, line in enumerate(window))
+        return f"{body}\n[{len(window)} lines shown, {total} total]"
+
+    def _list_dir(self, raw: object) -> str:
+        args = parse_arguments(raw)
+        if isinstance(args, str):
+            return args
+        resolved = self._resolve(args.get("path", ""))
+        if isinstance(resolved, str):
+            return resolved
+        if not resolved.is_dir():
+            return f"error: not a directory: {_final_name(args.get('path', ''), resolved)}"
+        directories: list[str] = []
+        files: list[str] = []
+        for entry in resolved.iterdir():
+            if entry.is_dir():
+                directories.append(entry.name)
+            else:
+                files.append(entry.name)
+        directories.sort(key=str.lower)
+        files.sort(key=str.lower)
+        lines = [name + "/" for name in directories] + files
+        if not lines:
+            return "[empty directory]"
+        return "\n".join(lines)
+
+    def _grep(self, raw: object) -> str:
+        args = parse_arguments(raw)
+        if isinstance(args, str):
+            return args
+        pattern = args.get("pattern")
+        if not isinstance(pattern, str) or pattern.strip() == "":
+            return "error: pattern is required"
+        try:
+            compiled = re.compile(pattern)
+        except re.error as exc:
+            return f"error: {exc}"
+        resolved = self._resolve(args.get("path", ""))
+        if isinstance(resolved, str):
+            return resolved
+        if not resolved.exists():
+            return f"error: {_final_name(args.get('path', ''), resolved)}"
+        files = [resolved] if resolved.is_file() else _walk_files(resolved)
+        matches: list[str] = []
+        limited = False
+        for file_path in files:
+            try:
+                text = file_path.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            relative = str(file_path.resolve().relative_to(self.workspace))
+            for number, line in enumerate(text.splitlines(), start=1):
+                if compiled.search(line):
+                    matches.append(f"{relative}:{number}:{line}")
+                    if len(matches) >= 50:
+                        limited = True
+                        break
+            if limited:
+                break
+        if not matches:
+            return "[no matches]"
+        text = "\n".join(matches)
+        if limited:
+            text += "\n…[match limit reached]"
+        return text
+
+    def _write_file(self, raw: object) -> str:
+        args = parse_arguments(raw)
+        if isinstance(args, str):
+            return args
+        path_value = args.get("path")
+        if not isinstance(path_value, str) or path_value.strip() == "":
+            return "error: path is required"
+        if "content" not in args:
+            return "error: content is required"
+        content = str(args["content"])
+        resolved = self._resolve(path_value)
+        if isinstance(resolved, str):
+            return resolved
+        if resolved.exists():
+            return "error: file exists; use edit_file to change it"
+        resolved.parent.mkdir(parents=True, exist_ok=True)
+        with resolved.open("w", encoding="utf-8", newline="\n") as handle:
+            handle.write(content)
+        size = resolved.stat().st_size
+        posix = resolved.relative_to(self.workspace).as_posix()
+        header = f"wrote {posix} ({size} bytes)"
+        diff = _unified([], content.splitlines(), posix)
+        if diff:
+            return header + "\n" + diff
+        return header
+
+    def _edit_file(self, raw: object) -> str:
+        args = parse_arguments(raw)
+        if isinstance(args, str):
+            return args
+        old = args.get("old_string")
+        if not isinstance(old, str) or old == "":
+            return "error: old_string is required"
+        if "new_string" not in args:
+            return "error: new_string is required"
+        new = args["new_string"]
+        if not isinstance(new, str):
+            return "error: new_string must be a string"
+        if old == new:
+            return "error: old_string and new_string are the same"
+        resolved = self._resolve(args.get("path", ""))
+        if isinstance(resolved, str):
+            return resolved
+        if not resolved.is_file():
+            return f"error: not a file: {_final_name(args.get('path', ''), resolved)}"
+        with resolved.open("r", encoding="utf-8", newline="") as handle:
+            text = handle.read()
+        count = text.count(old)
+        if count == 0 and "\r\n" in text and "\n" in old and "\r" not in old:
+            old = old.replace("\n", "\r\n")
+            new = new.replace("\n", "\r\n")
+            count = text.count(old)
+        if count == 0:
+            return "error: old_string not found"
+        if count > 1:
+            return f"error: old_string matched {count} times; add surrounding context"
+        updated = text.replace(old, new, 1)
+        with resolved.open("w", encoding="utf-8", newline="") as handle:
+            handle.write(updated)
+        posix = resolved.relative_to(self.workspace).as_posix()
+        header = f"edited {posix}"
+        diff = _unified(text.splitlines(), updated.splitlines(), posix)
+        if diff:
+            return header + "\n" + diff
+        return header
+
+    def _shell(self, raw: object) -> str:
+        args = parse_arguments(raw)
+        if isinstance(args, str):
+            return args
+        command = args.get("command")
+        if not isinstance(command, str) or command.strip() == "":
+            return "error: command is required"
+        if not self.confirm(command):
+            return "error: command not approved"
+        proc = subprocess.Popen(
+            command,
+            shell=True,
+            cwd=str(self.workspace),
+            env=os.environ.copy(),
+            stdin=None,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        try:
+            out, err = proc.communicate(timeout=SHELL_TIMEOUT_SECONDS)
+        except subprocess.TimeoutExpired:
+            _stop_process(proc)
+            proc.communicate()
+            return f"error: Command '{command}' timed out after {SHELL_TIMEOUT_SECONDS} seconds"
+        except KeyboardInterrupt:
+            _stop_process(proc)
+            try:
+                proc.communicate(timeout=1)
+            except Exception:
+                pass
+            raise
+        encoding = locale.getpreferredencoding(False)
+        try:
+            out_text = out.decode(encoding)
+            err_text = err.decode(encoding)
+        except UnicodeDecodeError as exc:
+            return f"error: {exc}"
+        combined = (out_text + err_text).rstrip()
+        if combined:
+            return f"{combined}\n[exit {proc.returncode}]"
+        return f"[exit {proc.returncode}]"
 
 
-def _text_files(root: Path) -> list[Path]:
-    found: list[Path] = []
-    if not root.exists():
-        raise FileNotFoundError(root.name)
+def _offset(value: object) -> int:
+    if value is None or (isinstance(value, str) and value.strip() == ""):
+        return 1
+    number = _number(value)
+    return 1 if number < 1 else number
+
+
+def _limit(value: object) -> int:
+    if value is None or (isinstance(value, str) and value.strip() == ""):
+        return 400
+    number = _number(value)
+    if number == 0:
+        return 400
+    if number < 1:
+        number = 1
+    if number > 2000:
+        number = 2000
+    return number
+
+
+def _number(value: object) -> int:
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    if isinstance(value, str):
+        return int(value.strip())
+    raise TypeError(f"expected a number, got {type(value).__name__}")
+
+
+def _final_name(raw: object, candidate: Path) -> str:
+    if isinstance(raw, str):
+        name = Path(raw.strip() or ".").name
+        if name not in ("", ".", ".."):
+            return name
+    return candidate.name or str(candidate)
+
+
+def _walk_files(root: Path) -> list[Path]:
+    files: list[Path] = []
     for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = [name for name in dirnames if name not in SKIP_DIRS]
+        dirnames[:] = [name for name in dirnames if name not in _GREP_SKIP]
         for name in filenames:
-            found.append(Path(dirpath) / name)
-            if len(found) >= 2000:
-                return found
-    return found
-
-
-def _required(args: dict, key: str) -> str:
-    value = args.get(key)
-    if not isinstance(value, str) or not value.strip():
-        raise ValueError(f"{key} is required")
-    return value
+            files.append(Path(dirpath) / name)
+            if len(files) >= 2000:
+                return files
+    return files

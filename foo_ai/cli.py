@@ -1,4 +1,4 @@
-"""Foo AI command line."""
+"""Arguments, printing, prompts, and process exit codes."""
 
 from __future__ import annotations
 
@@ -6,134 +6,180 @@ import argparse
 import sys
 from pathlib import Path
 
-from foo_ai import __version__
 from foo_ai.agent import Agent
 from foo_ai.client import ChatError, Client
-from foo_ai.config import ConfigError, load_mcp_servers, load_provider
-from foo_ai.mcp import McpHost
+from foo_ai.config import ConfigError, load_config
+from foo_ai.mcp import McpPool
+from foo_ai.session import Session
+from foo_ai.tools import Toolbox
 
 
-def confirm_shell(command: str, *, assume_yes: bool, read_line=input, is_tty: bool | None = None) -> bool:
-    """Print the command and wait for one yes. --yes skips the wait."""
-    print(f"\n$ {command}", flush=True)
-    if assume_yes:
-        return True
-    tty = sys.stdin.isatty() if is_tty is None else is_tty
-    if not tty:
-        print("Skipped: pass --yes to run shell commands.", flush=True)
-        return False
-    try:
-        answer = read_line("[y/N] ")
-    except EOFError:
-        print()
-        return False
-    return str(answer).strip().lower() in {"y", "yes"}
+class CliSink:
+    def __init__(self, show_thinking: bool, verbose: bool):
+        self.show_thinking = show_thinking
+        self.verbose = verbose
+
+    def content(self, text: str) -> None:
+        sys.stdout.write(text)
+        sys.stdout.flush()
+
+    def reasoning(self, text: str) -> None:
+        if self.show_thinking:
+            sys.stderr.write(text)
+            sys.stderr.flush()
+
+    def tool_name(self, name: str) -> None:
+        if self.show_thinking:
+            sys.stderr.write("\n")
+            sys.stderr.flush()
+        sys.stdout.write(f"\n→ {name}")
+        sys.stdout.flush()
+
+    def tool_result(self, name: str, result: str) -> None:
+        if self.verbose or name in {"edit_file", "write_file"}:
+            sys.stdout.write("\n" + result + "\n")
+        else:
+            sys.stdout.write(f"\n← {name} ({len(result)} chars)\n")
+        sys.stdout.flush()
+
+    def status(self, text: str) -> None:
+        sys.stderr.write(text)
+        sys.stderr.flush()
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="foo-ai", allow_abbrev=False)
+    parser.add_argument("prompt", nargs="*")
+    parser.add_argument("--workspace", default=None)
+    parser.add_argument("--max-steps", type=int, default=16)
+    parser.add_argument("--show-thinking", action="store_true")
+    parser.add_argument("--verbose", action="store_true")
+    parser.add_argument("--yes", action="store_true")
+    parser.add_argument("--provider", default=None)
+    parser.add_argument("--version", action="store_true")
+    return parser
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="foo-ai", description="Foo AI, a small coding agent.")
-    parser.add_argument("prompt", nargs="*", help="One-shot request. Omit it to start a session.")
-    parser.add_argument("--version", action="version", version=f"Foo AI {__version__}")
-    parser.add_argument("--workspace", type=Path, default=Path.cwd(), help="Directory tools may read and write.")
-    parser.add_argument("--max-steps", type=int, default=16, help="Maximum model rounds for one request.")
-    parser.add_argument("--show-thinking", action="store_true", help="Print reasoning text as it streams.")
-    parser.add_argument("--verbose", action="store_true", help="Print tool results.")
-    parser.add_argument("--yes", action="store_true", help="Run shell commands without asking.")
-    parser.add_argument("--provider", help="Named provider to use. Default: default_provider, or home.")
-    args = parser.parse_args(argv)
-
+    parser = build_parser()
     try:
-        provider = load_provider(name=args.provider)
-        servers = load_mcp_servers()
-    except ConfigError as exc:
-        print(exc, file=sys.stderr)
-        return 1
-    mcp = McpHost(servers)
-    try:
-        try:
-            notes = mcp.connect()
-        except KeyboardInterrupt:
-            print()
-            return 1
-        return _session(args, provider, mcp, notes)
-    finally:
-        mcp.close()
-
-
-def _session(args: argparse.Namespace, provider, mcp: McpHost, notes: list[str]) -> int:
-    agent = Agent(
-        Client(provider),
-        args.workspace.resolve(),
-        max_steps=args.max_steps,
-        confirm_shell=lambda command: confirm_shell(command, assume_yes=args.yes),
-        mcp=mcp,
-    )
-    banner = f"Foo AI · {provider.name} · {provider.model}"
-
-    def on_event(event: dict) -> None:
-        kind = event["type"]
-        if kind == "reasoning" and args.show_thinking:
-            print(event["text"], end="", file=sys.stderr, flush=True)
-        elif kind == "content":
-            print(event["text"], end="", flush=True)
-        elif kind == "tool_start":
-            if args.show_thinking:
-                print(file=sys.stderr)
-            print(f"\n→ {event['name']}", flush=True)
-        elif kind == "status":
-            print(f"\n{event['text']}", file=sys.stderr, flush=True)
-        elif kind == "usage":
-            print(f"\n{event['text']}", file=sys.stderr, flush=True)
-        elif kind == "tool_result":
-            if event["name"] in {"edit_file", "write_file"} or args.verbose:
-                print(event["content"])
-            else:
-                size = len(event["content"])
-                print(f"← {event['name']} ({size} chars)")
-
-    if agent.session_note:
-        print(agent.session_note)
-
-    def announce() -> None:
-        print(banner, flush=True)
-        for note in notes:
-            print(note, flush=True)
-
-    if args.prompt:
-        announce()
-        try:
-            agent.ask(" ".join(args.prompt), on_event)
-        except (ChatError, KeyboardInterrupt) as exc:
-            print(f"\n{exc}", file=sys.stderr)
-            return 1
-        print()
+        args = parser.parse_args(argv)
+    except SystemExit as exc:
+        code = exc.code
+        if code is None:
+            return 0
+        if isinstance(code, int):
+            return code
+        return 2
+    if args.version:
+        print("Foo AI 0.1.0", flush=True)
         return 0
+    try:
+        config = load_config(args.provider)
+    except ConfigError as exc:
+        sys.stderr.write(f"{exc}\n")
+        return 1
+    pool = McpPool(config.mcp_servers)
+    try:
+        try:
+            mcp_lines = pool.connect()
+        except KeyboardInterrupt:
+            sys.stdout.write("\n")
+            sys.stdout.flush()
+            return 1
+        workspace = Path(args.workspace).expanduser().resolve() if args.workspace else Path.cwd().resolve()
+        session = Session(workspace)
+        note = session.load()
+        if note:
+            print(note, flush=True)
+        print(f"Foo AI · {config.provider.name} · {config.provider.model}", flush=True)
+        for line in mcp_lines:
+            print(line, flush=True)
+        agent = Agent(
+            provider=config.provider,
+            session=session,
+            toolbox=Toolbox(workspace, _confirmer(args.yes), pool),
+            client=Client(config.provider),
+            sink=CliSink(args.show_thinking, args.verbose),
+            max_steps=args.max_steps,
+        )
+        if args.prompt:
+            return _one_shot(agent, " ".join(args.prompt))
+        print(f"Workspace {workspace}", flush=True)
+        print("/exit to quit, /reset to clear the conversation.", flush=True)
+        return _interactive(agent)
+    finally:
+        pool.close()
 
-    announce()
-    print(f"Workspace {agent.workspace}\n/exit to quit, /reset to clear the conversation.")
+
+def _confirmer(yes: bool):
+    def confirm(command: str) -> bool:
+        sys.stdout.write(f"\n$ {command}")
+        sys.stdout.flush()
+        if yes:
+            return True
+        if not sys.stdin.isatty():
+            sys.stdout.write("\nSkipped: pass --yes to run shell commands.\n")
+            sys.stdout.flush()
+            return False
+        sys.stdout.write("\n[y/N] ")
+        sys.stdout.flush()
+        answer = sys.stdin.readline()
+        if answer == "":
+            sys.stdout.write("\n")
+            sys.stdout.flush()
+            return False
+        return answer.strip().lower() in {"y", "yes"}
+
+    return confirm
+
+
+def _one_shot(agent: Agent, text: str) -> int:
+    try:
+        agent.ask(text)
+    except ChatError as exc:
+        sys.stderr.write(f"{exc}\n")
+        return 1
+    except KeyboardInterrupt as exc:
+        sys.stderr.write("\n")
+        message = str(exc)
+        if message:
+            sys.stderr.write(message + "\n")
+        return 1
+    if text.strip():
+        sys.stdout.write("\n")
+        sys.stdout.flush()
+    return 0
+
+
+def _interactive(agent: Agent) -> int:
     while True:
         try:
-            line = input("\n> ").strip()
-        except (EOFError, KeyboardInterrupt):
-            print()
+            line = input("\n> ")
+        except EOFError:
+            sys.stdout.write("\n")
+            sys.stdout.flush()
             return 0
-        if not line:
+        except KeyboardInterrupt:
+            sys.stdout.write("\n")
+            sys.stdout.flush()
+            return 0
+        command = line.strip()
+        if command == "":
             continue
-        if line in {"/exit", "/quit"}:
+        if command in {"/exit", "/quit"}:
             return 0
-        if line == "/reset":
-            print(agent.reset())
+        if command == "/reset":
+            print(agent.reset(), flush=True)
             continue
         try:
-            agent.ask(line, on_event)
+            agent.ask(line)
         except ChatError as exc:
-            print(f"\n{exc}", file=sys.stderr)
+            sys.stderr.write(f"\n{exc}\n")
             continue
         except KeyboardInterrupt:
-            print("\nInterrupted.")
+            sys.stdout.write("\nInterrupted.\n")
+            sys.stdout.flush()
             continue
-        print()
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())
+        sys.stdout.write("\n")
+        sys.stdout.flush()

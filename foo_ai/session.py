@@ -1,119 +1,174 @@
-"""Workspace session transcript at .foo-ai/session.jsonl."""
+"""Transcript file at .foo-ai/session.jsonl."""
 
 from __future__ import annotations
 
 import json
-from datetime import datetime
+import time
 from pathlib import Path
 
-SESSION_DIR = ".foo-ai"
-SESSION_NAME = "session.jsonl"
+from foo_ai.prompt import SYSTEM_PROMPT
+
+_INTERRUPTED = "error: interrupted before the tool result was saved"
 
 
-def session_path(workspace: Path) -> Path:
-    return workspace / SESSION_DIR / SESSION_NAME
+def system_message() -> dict:
+    return {"role": "system", "content": SYSTEM_PROMPT}
 
 
-def load_session(workspace: Path, system_prompt: str) -> tuple[list[dict], str]:
-    """Return messages and a note for the user. A broken file is renamed aside."""
-    fresh = [{"role": "system", "content": system_prompt}]
-    path = session_path(workspace)
-    if not path.is_file():
-        return fresh, ""
-    try:
-        messages = _read_jsonl(path)
-    except (OSError, UnicodeError, json.JSONDecodeError, ValueError):
-        broken = path.with_name("session.jsonl.broken")
-        if broken.exists():
-            broken.unlink()
-        path.replace(broken)
-        return fresh, "Session file was unreadable and was renamed to .foo-ai/session.jsonl.broken."
-    if not messages:
-        path.unlink()
-        return fresh, ""
-    if messages[0].get("role") != "system":
-        messages.insert(0, fresh[0])
-    else:
-        messages[0] = dict(fresh[0])
-    messages = close_open_tool_calls(messages)
-    count = len(messages) - 1
-    return messages, f"Resumed .foo-ai/session.jsonl ({count} messages)."
-
-
-def save_session(workspace: Path, messages: list[dict]) -> None:
-    path = session_path(workspace)
-    if len(messages) <= 1:
-        if path.is_file():
-            path.unlink()
-        return
-    path.parent.mkdir(parents=True, exist_ok=True)
-    payload = "\n".join(json.dumps(message, ensure_ascii=False) for message in messages) + "\n"
-    temporary = path.with_suffix(".jsonl.tmp")
-    temporary.write_text(payload, encoding="utf-8", newline="\n")
-    temporary.replace(path)
-
-
-def archive_session(workspace: Path) -> Path | None:
-    """Move the active session aside. Returns the archive path, if there was one."""
-    path = session_path(workspace)
-    if not path.is_file():
-        return None
-    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    destination = path.with_name(f"session-{stamp}.jsonl")
-    counter = 2
-    while destination.exists():
-        destination = path.with_name(f"session-{stamp}-{counter}.jsonl")
-        counter += 1
-    path.replace(destination)
-    return destination
-
-
-def close_open_tool_calls(messages: list[dict]) -> list[dict]:
-    """Append a result for every tool call that was saved without one.
-
-    A cancelled shell prompt or a crash can leave an assistant tool call at the
-    end of the file. The next request has to pair it before a new user turn.
-    """
-    repaired: list[dict] = []
+def repair_messages(messages: list[dict]) -> bool:
+    """Insert results for tool calls that never received one. Returns True when the list changes."""
+    result: list[dict] = []
     pending: list[str] = []
+    changed = False
+
+    def flush() -> None:
+        nonlocal changed
+        if not pending:
+            return
+        for call_id in pending:
+            result.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": call_id,
+                    "name": "",
+                    "content": _INTERRUPTED,
+                }
+            )
+        pending.clear()
+        changed = True
+
     for message in messages:
         role = message.get("role")
-        if pending and role != "tool":
-            repaired.extend(_interrupted(pending))
-            pending = []
-        repaired.append(message)
-        if role == "assistant":
-            pending = [str(call.get("id") or "") for call in message.get("tool_calls") or []]
-        elif role == "tool" and pending:
-            call_id = str(message.get("tool_call_id") or "")
+        if role == "tool":
+            call_id = message.get("tool_call_id")
             if call_id in pending:
                 pending.remove(call_id)
-            else:
+            elif pending:
                 pending.pop(0)
-    if pending:
-        repaired.extend(_interrupted(pending))
-    return repaired
-
-
-def _interrupted(call_ids: list[str]) -> list[dict]:
-    return [
-        {
-            "role": "tool",
-            "tool_call_id": call_id,
-            "name": "",
-            "content": "error: interrupted before the tool result was saved",
-        }
-        for call_id in call_ids
-    ]
-
-
-def _read_jsonl(path: Path) -> list[dict]:
-    messages = []
-    for line_number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
-        if not line.strip():
+            result.append(message)
             continue
-        item = json.loads(line)
-        if not isinstance(item, dict) or not isinstance(item.get("role"), str):
-            raise ValueError(f"line {line_number} is not a message")
-        messages.append(item)
-    return messages
+        flush()
+        result.append(message)
+        if role == "assistant" and message.get("tool_calls"):
+            pending = []
+            for call in message["tool_calls"]:
+                if isinstance(call, dict):
+                    call_id = call.get("id")
+                    pending.append(call_id if isinstance(call_id, str) else "")
+                else:
+                    pending.append("")
+    flush()
+    messages.clear()
+    messages.extend(result)
+    return changed
+
+
+class Session:
+    def __init__(self, workspace: Path):
+        self.workspace = workspace
+        self.directory = workspace / ".foo-ai"
+        self.path = self.directory / "session.jsonl"
+        self.messages: list[dict] = [system_message()]
+        self.note: str | None = None
+
+    def load(self) -> str | None:
+        self.messages = [system_message()]
+        self.note = None
+        if not self.path.exists():
+            return None
+        try:
+            text = self.path.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            self.note = self._mark_broken()
+            return self.note
+        if text.strip() == "":
+            self.path.unlink()
+            return None
+        parsed: list[dict] = []
+        for line in text.splitlines():
+            if line.strip() == "":
+                continue
+            try:
+                value = json.loads(line)
+            except json.JSONDecodeError:
+                self.note = self._mark_broken()
+                return self.note
+            if not isinstance(value, dict) or not isinstance(value.get("role"), str):
+                self.note = self._mark_broken()
+                return self.note
+            parsed.append(value)
+        if not parsed:
+            self.path.unlink()
+            return None
+        if parsed[0].get("role") == "system":
+            parsed[0] = system_message()
+        else:
+            parsed.insert(0, system_message())
+        repair_messages(parsed)
+        self.messages = parsed
+        count = len(parsed) - 1
+        self.note = f"Resumed .foo-ai/session.jsonl ({count} messages)."
+        return self.note
+
+    def _mark_broken(self) -> str:
+        broken = self.directory / "session.jsonl.broken"
+        if broken.exists():
+            broken.unlink()
+        self.path.replace(broken)
+        self.messages = [system_message()]
+        return "Session file was unreadable and was renamed to .foo-ai/session.jsonl.broken."
+
+    def save(self) -> None:
+        if len(self.messages) <= 1:
+            if self.path.exists():
+                self.path.unlink()
+            return
+        self.directory.mkdir(parents=True, exist_ok=True)
+        temporary = self.directory / "session.jsonl.tmp"
+        with temporary.open("w", encoding="utf-8", newline="\n") as handle:
+            for message in self.messages:
+                handle.write(json.dumps(message, ensure_ascii=False))
+                handle.write("\n")
+        temporary.replace(self.path)
+
+    def add_user(self, text: str) -> None:
+        self.messages.append({"role": "user", "content": text})
+
+    def add_assistant(self, content: str, reasoning: str, tool_calls: list[dict]) -> None:
+        record: dict = {
+            "role": "assistant",
+            "content": content,
+            "reasoning_content": reasoning,
+        }
+        if tool_calls:
+            if content == "":
+                record["content"] = None
+            record["tool_calls"] = tool_calls
+        self.messages.append(record)
+
+    def add_tool(self, call_id: str, name: str, content: str) -> None:
+        self.messages.append(
+            {
+                "role": "tool",
+                "tool_call_id": call_id,
+                "name": name,
+                "content": content,
+            }
+        )
+
+    def repair(self) -> bool:
+        return repair_messages(self.messages)
+
+    def reset(self) -> str:
+        self.messages = [system_message()]
+        if not self.path.exists():
+            return "Conversation cleared."
+        stamp = time.strftime("%Y%m%d-%H%M%S", time.localtime())
+        destination = self.directory / f"session-{stamp}.jsonl"
+        suffix = 2
+        while destination.exists():
+            destination = self.directory / f"session-{stamp}-{suffix}.jsonl"
+            suffix += 1
+        self.path.replace(destination)
+        relative = destination.relative_to(self.workspace).as_posix()
+        return f"Conversation cleared. Archived {relative}."
