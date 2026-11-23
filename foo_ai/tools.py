@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import difflib
 import json
 import os
 import re
 import subprocess
+from collections.abc import Callable
 from pathlib import Path
 
 READ_DEFAULT_LIMIT = 400
@@ -13,6 +15,9 @@ READ_MAX_LIMIT = 2000
 GREP_MAX_MATCHES = 50
 TOOL_OUTPUT_LIMIT = 20000
 SHELL_TIMEOUT_SECONDS = 120
+DIFF_MAX_LINES = 80
+
+ApproveShell = Callable[[str], bool]
 
 SKIP_DIRS = {".git", ".venv", "venv", "__pycache__", "node_modules", ".foo-ai"}
 
@@ -46,23 +51,33 @@ def tool_schemas() -> list[dict]:
         ),
         _function(
             "write_file",
-            "Create or replace a UTF-8 text file inside the workspace.",
+            "Create a new UTF-8 text file inside the workspace. Fails if the file already exists; use edit_file to change an existing file.",
             {
                 "path": {"type": "string", "description": "File path relative to the workspace."},
-                "content": {"type": "string", "description": "Full new file contents."},
+                "content": {"type": "string", "description": "Full file contents."},
             },
             ["path", "content"],
         ),
         _function(
+            "edit_file",
+            "Replace one exact occurrence of old_string with new_string in an existing file. old_string is raw file text, without the line-number prefix shown by read_file. Fails if old_string is missing or matches more than once; add surrounding lines to disambiguate.",
+            {
+                "path": {"type": "string", "description": "File path relative to the workspace."},
+                "old_string": {"type": "string", "description": "Exact text to replace. Must match once."},
+                "new_string": {"type": "string", "description": "Replacement text. An empty string deletes the match."},
+            },
+            ["path", "old_string", "new_string"],
+        ),
+        _function(
             "shell",
-            "Run a command in the workspace and return combined stdout and stderr. Prefer read_file, list_dir, and grep for file inspection.",
+            "Run a command in the workspace and return combined stdout and stderr. The user must approve the command before it runs. Prefer read_file, list_dir, grep, and edit_file for file work.",
             {"command": {"type": "string", "description": "Command to execute."}},
             ["command"],
         ),
     ]
 
 
-def run_tool(name: str, arguments: str | dict, workspace: Path) -> str:
+def run_tool(name: str, arguments: str | dict, workspace: Path, approve_shell: ApproveShell | None = None) -> str:
     try:
         args = _arguments(arguments)
     except json.JSONDecodeError as exc:
@@ -76,8 +91,10 @@ def run_tool(name: str, arguments: str | dict, workspace: Path) -> str:
             text = _grep(workspace, args)
         elif name == "write_file":
             text = _write_file(workspace, args)
+        elif name == "edit_file":
+            text = _edit_file(workspace, args)
         elif name == "shell":
-            text = _shell(workspace, args)
+            text = _shell(workspace, args, approve_shell)
         else:
             text = f"error: unknown tool {name!r}"
     except Exception as exc:
@@ -166,13 +183,86 @@ def _write_file(workspace: Path, args: dict) -> str:
     path = workspace_path(workspace, _required(args, "path"))
     if "content" not in args:
         raise ValueError("content is required")
+    if path.exists():
+        raise FileExistsError("file exists; use edit_file to change it")
+    content = str(args["content"])
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(str(args["content"]), encoding="utf-8", newline="\n")
-    return f"wrote {path.relative_to(workspace.resolve())} ({path.stat().st_size} bytes)"
+    path.write_text(content, encoding="utf-8", newline="\n")
+    relative = path.relative_to(workspace.resolve())
+    return _with_diff(f"wrote {relative.as_posix()} ({path.stat().st_size} bytes)", workspace, path, "", content)
 
 
-def _shell(workspace: Path, args: dict) -> str:
+def _edit_file(workspace: Path, args: dict) -> str:
+    path = workspace_path(workspace, _required(args, "path"))
+    if not path.is_file():
+        raise FileNotFoundError(f"not a file: {path.name}")
+    old = args.get("old_string")
+    if not isinstance(old, str) or old == "":
+        raise ValueError("old_string is required")
+    if "new_string" not in args:
+        raise ValueError("new_string is required")
+    new = args.get("new_string")
+    if not isinstance(new, str):
+        raise ValueError("new_string must be a string")
+    if old == new:
+        raise ValueError("old_string and new_string are the same")
+    before = _read_preserving_newlines(path)
+    after = _replace_once(before, old, new)
+    _write_preserving_newlines(path, after)
+    relative = path.relative_to(workspace.resolve())
+    return _with_diff(f"edited {relative.as_posix()}", workspace, path, before, after)
+
+
+def _read_preserving_newlines(path: Path) -> str:
+    # Path.read_text(newline=) requires Python 3.13. open() keeps CRLF on 3.11.
+    with path.open(encoding="utf-8", newline="") as handle:
+        return handle.read()
+
+
+def _write_preserving_newlines(path: Path, text: str) -> None:
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        handle.write(text)
+
+
+def _replace_once(text: str, old: str, new: str) -> str:
+    count = text.count(old)
+    # read_file shows logical lines, so the model sends \n. Match a CRLF file once.
+    if count == 0 and "\r\n" in text and "\n" in old and "\r" not in old:
+        return _replace_once(text, old.replace("\n", "\r\n"), new.replace("\n", "\r\n"))
+    if count == 0:
+        raise ValueError("old_string not found")
+    if count > 1:
+        raise ValueError(f"old_string matched {count} times; add surrounding context")
+    return text.replace(old, new, 1)
+
+
+def _with_diff(header: str, workspace: Path, path: Path, before: str, after: str) -> str:
+    diff = _unified(workspace, path, before, after)
+    return f"{header}\n{diff}" if diff else header
+
+
+def _unified(workspace: Path, path: Path, before: str, after: str) -> str:
+    relative = path.relative_to(workspace.resolve()).as_posix()
+    lines = list(
+        difflib.unified_diff(
+            before.splitlines(),
+            after.splitlines(),
+            fromfile=f"a/{relative}",
+            tofile=f"b/{relative}",
+            lineterm="",
+        )
+    )
+    if len(lines) > DIFF_MAX_LINES:
+        hidden = len(lines) - DIFF_MAX_LINES
+        lines = lines[:DIFF_MAX_LINES]
+        lines.append(f"…[{hidden} diff lines omitted]")
+    return "\n".join(lines)
+
+
+def _shell(workspace: Path, args: dict, approve_shell: ApproveShell | None) -> str:
     command = _required(args, "command")
+    if approve_shell is not None and not approve_shell(command):
+        return "error: command not approved"
     completed = subprocess.run(
         command,
         shell=True,

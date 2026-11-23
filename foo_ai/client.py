@@ -9,6 +9,7 @@ from collections.abc import Iterator
 from typing import Any
 
 from foo_ai.config import Provider
+from foo_ai.usage import parse_usage
 
 
 class ChatError(RuntimeError):
@@ -19,17 +20,19 @@ class Client:
     def __init__(self, provider: Provider):
         self.provider = provider
 
-    def build_body(self, messages: list[dict], tools: list[dict]) -> dict:
+    def build_body(self, messages: list[dict], tools: list[dict] | None) -> dict:
         body: dict[str, Any] = {
             "model": self.provider.model,
             "messages": messages,
-            "tools": tools,
             "stream": True,
         }
+        if tools is not None:
+            body["tools"] = tools
         body.update(self.provider.extra_body)
+        body.setdefault("stream_options", {"include_usage": True})
         return body
 
-    def stream(self, messages: list[dict], tools: list[dict]) -> Iterator[dict]:
+    def stream(self, messages: list[dict], tools: list[dict] | None) -> Iterator[dict]:
         body = json.dumps(self.build_body(messages, tools)).encode("utf-8")
         headers = {"Content-Type": "application/json", "Accept": "text/event-stream"}
         if self.provider.api_key:
@@ -47,7 +50,7 @@ class Client:
             content_type = response.headers.get("Content-Type", "")
             if "application/json" in content_type and "text/event-stream" not in content_type:
                 payload = json.loads(response.read().decode("utf-8"))
-                yield {"type": "message", "message": _message_from_json(payload)}
+                yield from _usage_and_message(payload)
                 return
             yield from _read_sse(response)
 
@@ -69,6 +72,13 @@ def assistant_message(message: dict) -> dict:
     return stored
 
 
+def _usage_and_message(payload: dict) -> Iterator[dict]:
+    usage = parse_usage(payload.get("usage"))
+    if usage:
+        yield {"type": "usage", "usage": usage}
+    yield {"type": "message", "message": _message_from_json(payload)}
+
+
 def _message_from_json(payload: dict) -> dict:
     try:
         message = payload["choices"][0]["message"]
@@ -88,6 +98,7 @@ def _read_sse(response) -> Iterator[dict]:
     order: list[int] = []
     started: set[int] = set()
     raw_lines: list[str] = []
+    usage: dict | None = None
 
     for raw in response:
         line = raw.decode("utf-8", errors="replace").strip()
@@ -107,6 +118,9 @@ def _read_sse(response) -> Iterator[dict]:
             detail = event["error"]
             message = detail.get("message", detail) if isinstance(detail, dict) else detail
             raise ChatError(str(message))
+        parsed = parse_usage(event.get("usage"))
+        if parsed:
+            usage = parsed
         choices = event.get("choices") or []
         if not choices:
             continue
@@ -143,9 +157,11 @@ def _read_sse(response) -> Iterator[dict]:
             payload = json.loads("\n".join(raw_lines))
         except json.JSONDecodeError as exc:
             raise ChatError("server closed the stream without a completed response") from exc
-        yield {"type": "message", "message": _message_from_json(payload)}
+        yield from _usage_and_message(payload)
         return
 
+    if usage:
+        yield {"type": "usage", "usage": usage}
     yield {
         "type": "message",
         "message": _finish_message("".join(content), "".join(reasoning), [calls[index] for index in order]),

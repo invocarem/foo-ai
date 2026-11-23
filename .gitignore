@@ -1,6 +1,14 @@
-__pycache__/
-*.py[cod]
+# Local provider settings, including the API key.
+foo-ai.toml
+
+# Resumed conversations.
+.foo-ai/
+
+# Local Python virtual environment.
 .venv/
-venv/
+
+# Python bytecode caches.
+__pycache__/
+
+# Setuptools metadata (e.g. foo_ai.egg-info/).
 *.egg-info/
-.pytest_cache/

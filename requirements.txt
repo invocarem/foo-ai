@@ -1,0 +1,3 @@
+# Foo AI has no third-party runtime dependencies.
+# This line installs the local package and the foo-ai command.
+-e .

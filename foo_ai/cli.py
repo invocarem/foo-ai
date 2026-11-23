@@ -9,7 +9,25 @@ from pathlib import Path
 from foo_ai import __version__
 from foo_ai.agent import Agent
 from foo_ai.client import ChatError, Client
-from foo_ai.config import load_provider
+from foo_ai.config import ConfigError, load_mcp_servers, load_provider
+from foo_ai.mcp import McpHost
+
+
+def confirm_shell(command: str, *, assume_yes: bool, read_line=input, is_tty: bool | None = None) -> bool:
+    """Print the command and wait for one yes. --yes skips the wait."""
+    print(f"\n$ {command}", flush=True)
+    if assume_yes:
+        return True
+    tty = sys.stdin.isatty() if is_tty is None else is_tty
+    if not tty:
+        print("Skipped: pass --yes to run shell commands.", flush=True)
+        return False
+    try:
+        answer = read_line("[y/N] ")
+    except EOFError:
+        print()
+        return False
+    return str(answer).strip().lower() in {"y", "yes"}
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -20,10 +38,36 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--max-steps", type=int, default=16, help="Maximum model rounds for one request.")
     parser.add_argument("--show-thinking", action="store_true", help="Print reasoning text as it streams.")
     parser.add_argument("--verbose", action="store_true", help="Print tool results.")
+    parser.add_argument("--yes", action="store_true", help="Run shell commands without asking.")
+    parser.add_argument("--provider", help="Named provider to use. Default: default_provider, or home.")
     args = parser.parse_args(argv)
 
-    provider = load_provider()
-    agent = Agent(Client(provider), args.workspace.resolve(), max_steps=args.max_steps)
+    try:
+        provider = load_provider(name=args.provider)
+        servers = load_mcp_servers()
+    except ConfigError as exc:
+        print(exc, file=sys.stderr)
+        return 1
+    mcp = McpHost(servers)
+    try:
+        try:
+            notes = mcp.connect()
+        except KeyboardInterrupt:
+            print()
+            return 1
+        return _session(args, provider, mcp, notes)
+    finally:
+        mcp.close()
+
+
+def _session(args: argparse.Namespace, provider, mcp: McpHost, notes: list[str]) -> int:
+    agent = Agent(
+        Client(provider),
+        args.workspace.resolve(),
+        max_steps=args.max_steps,
+        confirm_shell=lambda command: confirm_shell(command, assume_yes=args.yes),
+        mcp=mcp,
+    )
     banner = f"Foo AI · {provider.name} · {provider.model}"
 
     def on_event(event: dict) -> None:
@@ -36,15 +80,27 @@ def main(argv: list[str] | None = None) -> int:
             if args.show_thinking:
                 print(file=sys.stderr)
             print(f"\n→ {event['name']}", flush=True)
+        elif kind == "status":
+            print(f"\n{event['text']}", file=sys.stderr, flush=True)
+        elif kind == "usage":
+            print(f"\n{event['text']}", file=sys.stderr, flush=True)
         elif kind == "tool_result":
-            if args.verbose:
+            if event["name"] in {"edit_file", "write_file"} or args.verbose:
                 print(event["content"])
             else:
                 size = len(event["content"])
                 print(f"← {event['name']} ({size} chars)")
 
+    if agent.session_note:
+        print(agent.session_note)
+
+    def announce() -> None:
+        print(banner, flush=True)
+        for note in notes:
+            print(note, flush=True)
+
     if args.prompt:
-        print(banner)
+        announce()
         try:
             agent.ask(" ".join(args.prompt), on_event)
         except (ChatError, KeyboardInterrupt) as exc:
@@ -53,7 +109,8 @@ def main(argv: list[str] | None = None) -> int:
         print()
         return 0
 
-    print(f"{banner}\nWorkspace {agent.workspace}\n/exit to quit, /reset to clear the conversation.")
+    announce()
+    print(f"Workspace {agent.workspace}\n/exit to quit, /reset to clear the conversation.")
     while True:
         try:
             line = input("\n> ").strip()
@@ -65,8 +122,7 @@ def main(argv: list[str] | None = None) -> int:
         if line in {"/exit", "/quit"}:
             return 0
         if line == "/reset":
-            agent.reset()
-            print("Conversation cleared.")
+            print(agent.reset())
             continue
         try:
             agent.ask(line, on_event)

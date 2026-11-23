@@ -1,11 +1,28 @@
-# Copy to foo-ai.toml in the directory where you launch Foo AI to override defaults.
+# Copy to foo-ai.toml in the directory where you launch Foo AI.
+# --provider and FOO_AI_PROVIDER choose a name. Otherwise default_provider is used.
 
-[provider]
-name = "home"
-base_url = "http://100.109.56.33:81/v1"
+default_provider = "home"
+
+[providers.home]
+base_url = "http://127.0.0.1:8100/v1"
 model = "DeepSeek-V4.1-Flash-1017"
+# context_window = 1000000
 # api_key = ""
 
-[provider.extra_body.chat_template_kwargs]
+[providers.home.extra_body.chat_template_kwargs]
 reasoning_effort = "max"
 thinking = true
+
+[providers.deepseek-flash_1]
+base_url = "https://api.deepseek.com/v1"
+model = "deepseek-flash"
+# api_key = ""
+
+# Stdio MCP servers start only when enabled = true. The launch command stays foo-ai.
+# Python inside Docker must be unbuffered (-u). The whitaker-mcp container must be running.
+
+[mcp.whitaker]
+enabled = false
+command = "docker"
+args = ["exec", "-i", "whitaker-mcp", "python", "-u", "/app/whitaker_server.py"]
+timeout_seconds = 120
