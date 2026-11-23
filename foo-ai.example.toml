@@ -1,0 +1,11 @@
+# Copy to foo-ai.toml in the directory where you launch Foo AI to override defaults.
+
+[provider]
+name = "home"
+base_url = "http://100.109.56.33:81/v1"
+model = "DeepSeek-V4.1-Flash-1017"
+# api_key = ""
+
+[provider.extra_body.chat_template_kwargs]
+reasoning_effort = "max"
+thinking = true
