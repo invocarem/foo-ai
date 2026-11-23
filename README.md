@@ -26,16 +26,36 @@ One request:
 python -m foo_ai "Summarize the files in this directory"
 ```
 
+Print the version and exit:
+
+```sh
+python -m foo_ai --version
+```
+
+That prints `Foo AI 0.1.0`.
+
 Optional install so the `foo-ai` command is on your path:
 
 ```sh
-pip install -e .
+pip install -r requirements.txt
 foo-ai
 ```
+
+`requirements.txt` has no third-party packages. It installs this directory with `-e .`, which is the same as `pip install -e .`.
 
 Inside the session, `/reset` archives the conversation and starts a new one. `/exit` quits. The transcript is stored in `.foo-ai/session.jsonl` under the workspace and reloaded on the next launch. `--show-thinking` prints the model's reasoning. `--verbose` prints full tool output. `--yes` runs shell commands without asking.
 
 Copy `foo-ai.example.toml` to `foo-ai.toml` in the launch directory to change providers. `foo-ai.toml` is local and holds API keys; do not commit it. `--provider` or `FOO_AI_PROVIDER` chooses a name. `FOO_AI_BASE_URL`, `FOO_AI_MODEL`, and `FOO_AI_API_KEY` override the selected provider.
+
+## Tests
+
+From this directory:
+
+```sh
+python -m unittest tests.test_foo_ai
+```
+
+The suite uses only the standard library. It does not call a model server.
 
 ## Tools
 
