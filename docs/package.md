@@ -4,12 +4,14 @@ Foo AI is a Python package named `foo_ai`, version `0.1.0`. The project root con
 
 ## Layout
 
+Module boundaries inside `foo_ai` are the implementer's choice. The tree below is one workable split. Merging or renaming those modules still meets this specification when the behavior in the other documents is unchanged.
+
 ```text
 pyproject.toml
 foo-ai.example.toml
 .gitignore
 foo_ai/__init__.py      # __version__ = "0.1.0"
-foo_ai/__main__.py      # calls cli.main and raises SystemExit
+foo_ai/__main__.py      # calls main and raises SystemExit
 foo_ai/prompt.py        # the system prompt text
 foo_ai/cli.py           # arguments, printing, prompts, process exit codes
 foo_ai/agent.py         # the step loop
@@ -22,7 +24,7 @@ foo_ai/mcp.py           # stdio MCP
 foo_ai/usage.py         # usage parsing and the context line
 ```
 
-`foo_ai/__init__.py` is:
+`python -m foo_ai` requires `foo_ai/__main__.py`. That file calls `main` and, when run as `__main__`, raises `SystemExit(main())`. In the recommended split, `main` lives in `foo_ai.cli` and `__init__.py` is:
 
 ```python
 """Foo AI, a small coding agent."""
@@ -30,13 +32,13 @@ foo_ai/usage.py         # usage parsing and the context line
 __version__ = "0.1.0"
 ```
 
-`foo_ai/__main__.py` imports `main` from `foo_ai.cli` and, when run as `__main__`, raises `SystemExit(main())`.
-
-Runtime imports stay in the standard library. The ones this program needs are `argparse`, `json`, `tomllib`, `urllib.request`, `subprocess`, `difflib`, `hashlib`, `threading`, `pathlib`, `os`, `re`, `dataclasses`, and `datetime`. `tomllib` is why Python 3.11 is the minimum. File diffs are `difflib.unified_diff` with its default of three context lines. Directory search uses `os.walk`. MCP names use `hashlib.sha256`.
+The running program imports only the standard library. Parse `foo-ai.toml` with `tomllib`. That module is why Python 3.11 is the minimum, and it is the TOML parser: the program does not carry another TOML package and does not implement TOML itself. File diffs are `difflib.unified_diff` with its default of three context lines. Directory search uses `os.walk`. MCP names use `hashlib.sha256`. HTTP uses `urllib.request`. Processes use `subprocess`. The MCP client reads stdout and stderr on separate threads.
 
 ## Install
 
-`pyproject.toml`:
+Setuptools is the build backend only. It is not imported by the running program. The project name is `foo-ai`, the version is `0.1.0`, `requires-python` is `>=3.11`, and `dependencies` is empty. The console script is named `foo-ai` and calls the same `main` as `python -m foo_ai`. `main` accepts an optional argv list and returns an exit code. `--version` prints `Foo AI 0.1.0` to standard output and exits 0.
+
+With the recommended split, `pyproject.toml` is:
 
 ```toml
 [build-system]
@@ -56,10 +58,6 @@ foo-ai = "foo_ai.cli:main"
 [tool.setuptools.packages.find]
 include = ["foo_ai*"]
 ```
-
-Setuptools is a build backend only. It is not imported by the running program.
-
-Both `python -m foo_ai` and the `foo-ai` script call `foo_ai.cli.main`. `main` accepts an optional argv list and returns an exit code. `--version` prints `Foo AI 0.1.0` to standard output and exits 0.
 
 `.gitignore`:
 

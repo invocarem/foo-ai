@@ -26,7 +26,7 @@ The request URL is `base_url` with one trailing slash removed, then `/chat/compl
 ## Where settings come from
 
 1. The built-in catalog above.
-2. `foo-ai.toml` in the current directory, when that file exists. This is the launch directory, which can differ from `--workspace`. Parse it with `tomllib`.
+2. `foo-ai.toml` in the current directory, when that file exists. This is the launch directory, which can differ from `--workspace`. Parse it with `tomllib` from the standard library.
 3. The selected provider, chosen by the first non-blank value among `--provider`, `FOO_AI_PROVIDER`, and `default_provider`. If none of those is set, the name is `home`.
 4. `FOO_AI_BASE_URL` and `FOO_AI_MODEL`, when non-blank, replace the selected provider's fields. If `FOO_AI_API_KEY` is set at all, including as an empty string, it replaces the key. An empty key clears it. These variables do not change `extra_body`.
 
