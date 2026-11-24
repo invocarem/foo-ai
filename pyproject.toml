@@ -11,9 +11,10 @@ dependencies = []
 
 [project.scripts]
 foo-ai = "foo_ai.cli:main"
+foo-ai-desktop = "foo_ai.gui:main"
 
 [tool.setuptools.packages.find]
 include = ["foo_ai*"]
 
 [tool.setuptools.package-data]
-foo_ai = ["skills/*/SKILL.md"]
+foo_ai = ["skills/*/SKILL.md", "gui/static/*"]

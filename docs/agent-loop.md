@@ -2,13 +2,19 @@
 
 `Agent.ask` takes one user string. It strips the string. An empty result returns immediately and writes nothing.
 
-Otherwise it repairs unpaired tool calls, appends one user message, and takes up to the step budget model rounds. The budget is `--max-steps` when that flag is present. Otherwise it is `max_steps` in `<workspace>/.foo-ai.toml` when that key is present. Otherwise it is `max_steps` in the launch `foo-ai.toml` when that key is present. Otherwise it is 200. A bool, a non-integer, or a value below 1 fails before any server starts with `max_steps must be a positive integer`. The workspace file prefixes that message with `.foo-ai.toml: `. The iteration count follows `range(max_steps)`: zero or a negative value performs no model call. Each round does three things:
+Otherwise it clears this request's task list, repairs unpaired tool calls, appends one user message, and takes up to the step budget model rounds. When that clear drops a non-empty list, publish the empty list. A subagent slash command clears the parent's list the same way before the child starts. `/reset` clears it too. An inline slash command clears it inside `ask`. The budget is `--max-steps` when that flag is present. Otherwise it is `max_steps` in `<workspace>/.foo-ai.toml` when that key is present. Otherwise it is `max_steps` in the launch `foo-ai.toml` when that key is present. Otherwise it is 200. A bool, a non-integer, or a value below 1 fails before any server starts with `max_steps must be a positive integer`. The workspace file prefixes that message with `.foo-ai.toml: `. The iteration count follows `range(max_steps)`: zero or a negative value performs no model call. Each round does three things:
 
 1. Fit the transcript to the context window. See [Context](context.md).
 2. Stream one chat completion with the tool list captured at the start of this request. The list does not change between rounds.
 3. Store the assistant message. If it has no tool calls, return its content, or `""` when there is no content. That is the answer. If it has tool calls, run each one in listed order, append a tool result, and take another round.
 
 Tool calls in one turn are not concurrent. An `error:` result does not skip the later calls in that turn. Each assistant message and each tool result is saved before the next call runs. See [Session](session.md) for the saved objects.
+
+When the assistant message has no tool calls, the task list still has a `pending` or `in_progress` item, and this request has appended fewer than two continuation notes, do not return yet. Append one user message and take another round. The note is `[todo] Your task list still has open items. Continue the work, update the list with todo_write, and do not give the final answer until every item is completed or you have removed it.` followed by a newline and one line per open item, in list order: `- [{status}] {content}`. A completed item is not listed. The third final answer in the same request is returned even if items remain. The count resets at the start of the next request. The closing round after the step budget does not append a note.
+
+When any tool result in the turn is the `ask` dismiss sentence from [Tools](tools.md), return that sentence after the rest of that turn's tools have run. Do not take another model round.
+
+A successful `todo_write` publishes the stored list to the sink. The CLI print is specified in [Tools](tools.md).
 
 If every round within a positive `--max-steps` asks for tools, those tools have already run. Take one closing round. It sends no `tools` key. Fit and the usage line work the same way. Tool calls in that round are not run and are not stored. When its content is non-blank after strip, or it has no tool calls, store the assistant message with that content, empty or not, and with no tool calls, then return the content. When it has tool calls and the content is blank after strip, emit `Stopped: tool-call limit reached before a final answer.`
 
@@ -28,6 +34,8 @@ Use the available tools when they help you complete the user's request.
 Keep changes focused and responses concise.
 
 Work practices: when the request names a specific approach, implement that. Keep scratch files out of the repository. Review what you changed before declaring done. Change existing files with edit_file, using exact raw text that matches once. Use write_file only to create files.
+
+When a task takes more than a couple of steps, call todo_write with the full list before you edit, keep one item in_progress, mark items completed as you finish them, and do not give the final answer while any item is still open. Call ask only for a decision you cannot settle from the request, the code, or a sensible default, such as approach, scope, or something hard to undo. Otherwise pick the default and say so.
 
 Reply in the same language as the user's latest message. Do not translate code, paths, or commands.
 ```
@@ -52,7 +60,7 @@ The words of a one-shot prompt are joined with single spaces, then stripped by `
 | `--max-steps` | Model rounds for one request and for a subagent skill. Overrides `max_steps` in the config files. |
 | `--show-thinking` | Print `reasoning_content` as it streams, on standard error. |
 | `--verbose` | Print every tool result. Edits and new files print their result either way. |
-| `--yes` | Run shell commands without waiting for confirmation. |
+| `--yes` | Run shell commands without waiting for confirmation. It does not answer `ask`. |
 | `--provider` | Named provider to use. See [Provider](provider.md). |
 | `--version` | Print `Foo AI 0.1.0` and exit 0. |
 
@@ -101,6 +109,8 @@ The CLI prints stream events. It does not print `ask`'s return value a second ti
 | Reasoning | Standard error, each chunk, only with `--show-thinking`. |
 | `\n→ {tool name}` | Standard output when the first non-empty name fragment for that tool call arrives. If `--show-thinking`, print a newline on standard error first. The executed name is the full concatenation, which can be longer than this line when the server splits the name. |
 | Shell confirmation | Standard output, from the CLI, before the tool result. See [Tools](tools.md). |
+| `ask` choices | Standard output, from the CLI, before the tool result, only when stdin is a terminal. See [Tools](tools.md). |
+| Task list | Standard output, when `todo_write` succeeds and when a clear drops a non-empty list. See [Tools](tools.md). |
 | Result of `edit_file` and `write_file` | Standard output, always. |
 | Full result of any tool | Standard output, with `--verbose`. |
 | `← {tool name} ({N} chars)` | Standard output for the other tools when `--verbose` is off. `N` is the character length of the result string. |

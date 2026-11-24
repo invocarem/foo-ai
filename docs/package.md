@@ -19,12 +19,18 @@ foo_ai/client.py        # HTTP, SSE, stored assistant messages
 foo_ai/config.py        # providers and MCP tables
 foo_ai/context.py       # compress, summary, and discard
 foo_ai/session.py       # .foo-ai/session.jsonl
-foo_ai/tools.py         # the seven built-in tools
+foo_ai/tools.py         # the built-in tools
 foo_ai/skill.py         # skill files, run_skill, and subagent runs
 foo_ai/skills/explore/SKILL.md
 foo_ai/skills/review/SKILL.md
 foo_ai/mcp.py           # stdio MCP
 foo_ai/usage.py         # usage parsing and the context line
+foo_ai/gui/__init__.py  # the desktop page: the console script target
+foo_ai/gui/__main__.py  # python -m foo_ai.gui
+foo_ai/gui/server.py    # loopback HTTP server and the JSON API
+foo_ai/gui/hub.py       # the agent, its event log, approvals, and cancel
+foo_ai/gui/static/      # index.html, styles.css, app.js, favicon.svg
+desktop/                # Electron shell around the page
 ```
 
 `python -m foo_ai` requires `foo_ai/__main__.py`. That file calls `main` and, when run as `__main__`, raises `SystemExit(main())`. In the recommended split, `main` lives in `foo_ai.cli` and `__init__.py` is:
@@ -57,13 +63,16 @@ dependencies = []
 
 [project.scripts]
 foo-ai = "foo_ai.cli:main"
+foo-ai-desktop = "foo_ai.gui:main"
 
 [tool.setuptools.packages.find]
 include = ["foo_ai*"]
 
 [tool.setuptools.package-data]
-foo_ai = ["skills/*/SKILL.md"]
+foo_ai = ["skills/*/SKILL.md", "gui/static/*"]
 ```
+
+The desktop page adds the second script and the `gui/static` package data. Both scripts are standard-library programs; the CLI contract above is unchanged.
 
 `.gitignore`:
 
@@ -89,4 +98,4 @@ The workspace used by every tool is that resolved path. `foo-ai.toml` is read fr
 
 ## What the model must see
 
-Every normal model round sends the same tool list: the seven built-in schemas, then `run_skill` when at least one skill is loaded, then the MCP schemas connected at startup, in server order and tool-list order. The summary call and the closing round after the step limit send no `tools` key at all. See [Agent loop](agent-loop.md). Assistant messages that remain in the transcript keep `reasoning_content`. Those two rules are what keep a thinking model from rejecting the next request. A skill subagent sends only its allowed built-in tools. See [Skills](skills.md).
+Every normal model round sends the same tool list: the nine built-in schemas, then `run_skill` when at least one skill is loaded, then the MCP schemas connected at startup, in server order and tool-list order. The summary call and the closing round after the step limit send no `tools` key at all. See [Agent loop](agent-loop.md). Assistant messages that remain in the transcript keep `reasoning_content`. Those two rules are what keep a thinking model from rejecting the next request. A skill subagent sends only its allowed built-in tools. See [Skills](skills.md).

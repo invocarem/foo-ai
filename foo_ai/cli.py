@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import re
 import sys
 from pathlib import Path
 
@@ -46,6 +47,17 @@ class CliSink:
     def status(self, text: str) -> None:
         sys.stderr.write(text)
         sys.stderr.flush()
+
+    def todos(self, items: list[dict]) -> None:
+        if not items:
+            sys.stdout.write("\nTodos: (none)\n")
+        else:
+            marks = {"pending": " ", "in_progress": ">", "completed": "x"}
+            lines = ["\nTodos:"]
+            for item in items:
+                lines.append(f" [{marks[item['status']]}] {item['content']}")
+            sys.stdout.write("\n".join(lines) + "\n")
+        sys.stdout.flush()
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -105,7 +117,7 @@ def main(argv: list[str] | None = None) -> int:
         agent = Agent(
             provider=config.provider,
             session=session,
-            toolbox=Toolbox(workspace, _confirmer(args.yes), pool, skills),
+            toolbox=Toolbox(workspace, _confirmer(args.yes), pool, skills, asker=make_asker()),
             client=Client(config.provider),
             sink=CliSink(args.show_thinking, args.verbose),
             max_steps=args.max_steps if args.max_steps is not None else config.max_steps,
@@ -120,6 +132,88 @@ def main(argv: list[str] | None = None) -> int:
         return _interactive(agent)
     finally:
         pool.close()
+
+
+def make_asker():
+    """The ask tool's reader. A pipe returns None so the model states an assumption."""
+
+    def ask(questions: list[dict]) -> list[dict] | None:
+        if not sys.stdin.isatty():
+            return None
+        return prompt_questions(questions, sys.stdin, sys.stdout)
+
+    return ask
+
+
+def prompt_questions(questions: list[dict], stdin, stdout) -> list[dict]:
+    """Print numbered choices and read one answer line per question.
+
+    EOF dismisses the whole batch and returns ``[]``. A blank line leaves that
+    question unanswered.
+    """
+    answers: list[dict] = []
+    for question in questions:
+        stdout.write(f"\n? {question['header']}\n")
+        stdout.write(question["question"] + "\n")
+        for index, option in enumerate(question["options"], start=1):
+            line = f"  {index}. {option['label']}"
+            description = option.get("description") or ""
+            if description:
+                line += f" - {description}"
+            stdout.write(line + "\n")
+        count = len(question["options"])
+        prompt = _choice_prompt(count, question["multiSelect"])
+        stdout.write(prompt)
+        stdout.flush()
+        while True:
+            line = stdin.readline()
+            if line == "":
+                stdout.write("\n")
+                stdout.flush()
+                return []
+            picked, error = _parse_choice(line, count, question["multiSelect"])
+            if error:
+                stdout.write(error + "\n")
+                stdout.write(prompt)
+                stdout.flush()
+                continue
+            labels = [question["options"][number - 1]["label"] for number in picked]
+            answers.append({"id": question["id"], "selected": labels})
+            break
+    return answers
+
+
+def _choice_prompt(count: int, multi: bool) -> str:
+    if multi:
+        return f"Choose any [1-{count}], comma-separated: "
+    return f"Choose one [1-{count}]: "
+
+
+def _choice_error(count: int, multi: bool) -> str:
+    if multi:
+        return f"Enter numbers from 1 to {count}, separated by commas."
+    return f"Enter a number from 1 to {count}."
+
+
+def _parse_choice(line: str, count: int, multi: bool) -> tuple[list[int], str | None]:
+    text = line.strip()
+    if text == "":
+        return [], None
+    parts = [part for part in re.split(r"[\s,]+", text) if part]
+    numbers: list[int] = []
+    for part in parts:
+        if not part.isdigit():
+            return [], _choice_error(count, multi)
+        number = int(part)
+        if number < 1 or number > count:
+            return [], _choice_error(count, multi)
+        if number not in numbers:
+            numbers.append(number)
+    if not numbers:
+        return [], _choice_error(count, multi)
+    if not multi and len(numbers) != 1:
+        return [], f"Enter one number from 1 to {count}."
+    return numbers, None
 
 
 def _confirmer(yes: bool):

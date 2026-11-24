@@ -1,4 +1,4 @@
-"""The seven built-in tools."""
+"""The built-in tools."""
 
 from __future__ import annotations
 
@@ -10,7 +10,17 @@ import re
 import subprocess
 from pathlib import Path
 
-TOOL_NAMES = ("read_file", "list_dir", "glob", "grep", "write_file", "edit_file", "shell")
+TOOL_NAMES = (
+    "read_file",
+    "list_dir",
+    "glob",
+    "grep",
+    "write_file",
+    "edit_file",
+    "shell",
+    "todo_write",
+    "ask",
+)
 
 SHELL_TIMEOUT_SECONDS = 120
 RESULT_LIMIT = 20_000
@@ -164,6 +174,98 @@ TOOL_SCHEMAS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "todo_write",
+            "description": (
+                "Replace this request's task list. Send the full list on every call. "
+                "An empty list clears it. Each item has content and status: "
+                "pending, in_progress, or completed."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "todos": {
+                        "type": "array",
+                        "description": "The complete task list. Replaces the previous list. [] clears it.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "content": {
+                                    "type": "string",
+                                    "description": "Task text. Leading and trailing whitespace is removed.",
+                                },
+                                "status": {
+                                    "type": "string",
+                                    "enum": ["pending", "in_progress", "completed"],
+                                },
+                            },
+                            "required": ["content", "status"],
+                        },
+                    }
+                },
+                "required": ["todos"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "ask",
+            "description": (
+                "Ask the user 1 to 3 multiple-choice questions when a decision is theirs to make "
+                "and you cannot settle it from the request, the code, or a sensible default. "
+                "Each question has a short header, the question text, 2 to 4 options, "
+                "and multiSelect when more than one option may apply. "
+                "Put any recommended option first. Do not use this for a decision with an obvious default."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "questions": {
+                        "type": "array",
+                        "minItems": 1,
+                        "maxItems": 3,
+                        "description": "1 to 3 related questions to ask together.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "header": {
+                                    "type": "string",
+                                    "description": "Very short label, such as Library.",
+                                },
+                                "question": {"type": "string", "description": "The full question."},
+                                "options": {
+                                    "type": "array",
+                                    "minItems": 2,
+                                    "maxItems": 4,
+                                    "description": "The choices. Put any recommended option first.",
+                                    "items": {
+                                        "type": "object",
+                                        "properties": {
+                                            "label": {"type": "string", "description": "The choice text."},
+                                            "description": {
+                                                "type": "string",
+                                                "description": "Optional one-line explanation.",
+                                            },
+                                        },
+                                        "required": ["label"],
+                                    },
+                                },
+                                "multiSelect": {
+                                    "type": "boolean",
+                                    "description": "Allow selecting more than one option.",
+                                },
+                            },
+                            "required": ["header", "question", "options"],
+                        },
+                    }
+                },
+                "required": ["questions"],
+            },
+        },
+    },
 ]
 
 
@@ -189,6 +291,104 @@ def cap_result(result: str) -> str:
     if len(result) > RESULT_LIMIT:
         return result[:RESULT_LIMIT] + "\n…[truncated]"
     return result
+
+
+ASK_NO_USER = (
+    "No interactive user answered. This is a model-assumption fallback, not a user answer. "
+    "Proceed with your best judgment, state the assumption you made, and prefer the safest "
+    "reversible option when choices differ in risk."
+)
+ASK_DISMISSED = (
+    'The user dismissed the question without choosing — read this as "don\'t decide for me, let\'s just talk." '
+    "Do not pick an option, run a tool, or take any further action toward this; stop and wait for the user's next message."
+)
+_TODO_STATUS = {"pending", "in_progress", "completed"}
+
+
+def normalize_questions(raw: object) -> tuple[list[dict], str] | tuple[None, str]:
+    """Return the questions the asker shows, or ``(None, error text)``."""
+    if not isinstance(raw, list):
+        return None, "error: questions is required"
+    if not 1 <= len(raw) <= 3:
+        return None, "error: questions must contain 1 to 3 items"
+    questions: list[dict] = []
+    for index, item in enumerate(raw):
+        if not isinstance(item, dict):
+            return None, f"error: questions[{index}] must be an object"
+        question = item.get("question")
+        header = item.get("header")
+        if not isinstance(question, str) or question.strip() == "":
+            return None, f"error: questions[{index}].question must be a non-empty string"
+        if not isinstance(header, str) or header.strip() == "":
+            return None, f"error: questions[{index}].header must be a non-empty string"
+        options = item.get("options")
+        if not isinstance(options, list) or not 2 <= len(options) <= 4:
+            return None, f"error: questions[{index}].options must contain 2 to 4 items"
+        cleaned_options: list[dict] = []
+        seen: set[str] = set()
+        for option_index, option in enumerate(options):
+            if not isinstance(option, dict):
+                return None, f"error: questions[{index}].options[{option_index}] must be an object"
+            label = option.get("label")
+            if not isinstance(label, str) or label.strip() == "":
+                return None, (
+                    f"error: questions[{index}].options[{option_index}].label must be a non-empty string"
+                )
+            label = label.strip()
+            if label in seen:
+                return None, f"error: questions[{index}].options[{option_index}].label duplicates an earlier option"
+            seen.add(label)
+            if "description" in option and not isinstance(option["description"], str):
+                return None, (
+                    f"error: questions[{index}].options[{option_index}].description must be a string"
+                )
+            description = option.get("description")
+            description = description.strip() if isinstance(description, str) else ""
+            cleaned_options.append({"label": label, "description": description})
+        if "multiSelect" in item and not isinstance(item["multiSelect"], bool):
+            return None, f"error: questions[{index}].multiSelect must be a boolean"
+        questions.append(
+            {
+                "id": f"q{index + 1}",
+                "header": header.strip(),
+                "question": question.strip(),
+                "options": cleaned_options,
+                "multiSelect": item.get("multiSelect") is True,
+            }
+        )
+    return questions, ""
+
+
+def format_answers(questions: list[dict], answers: object) -> str:
+    """The model-facing summary of one answered ask, or the dismiss sentence."""
+    selected: dict[str, list[str]] = {}
+    if isinstance(answers, list):
+        for item in answers:
+            if not isinstance(item, dict) or not isinstance(item.get("id"), str):
+                continue
+            raw = item.get("selected")
+            if not isinstance(raw, list):
+                continue
+            selected[item["id"]] = [label for label in raw if isinstance(label, str)]
+    lines: list[str] = []
+    answered = 0
+    for question in questions:
+        allowed = [option["label"] for option in question["options"]]
+        picks: list[str] = []
+        for label in selected.get(question["id"], []):
+            if label in allowed and label not in picks:
+                picks.append(label)
+        if not question["multiSelect"]:
+            picks = picks[:1]
+        header = question["header"] or question["question"]
+        if picks:
+            answered += 1
+            lines.append(f"- {header}: {', '.join(picks)}")
+        else:
+            lines.append(f"- {header}: (left unanswered — don't assume a choice)")
+    if answered == 0:
+        return ASK_DISMISSED
+    return "The user answered:\n" + "\n".join(lines)
 
 
 def _stop_process(proc: subprocess.Popen) -> None:
@@ -223,12 +423,17 @@ def _unified(old_lines: list[str], new_lines: list[str], posix_path: str) -> str
 
 
 class Toolbox:
-    def __init__(self, workspace: Path, confirm, mcp=None, skills=None):
+    def __init__(self, workspace: Path, confirm, mcp=None, skills=None, asker=None):
         self.workspace = workspace.resolve()
         self.confirm = confirm
         self.mcp = mcp
         self.skills = skills
+        self.asker = asker
         self.skill_runner = None
+        self.todos: list[dict] = []
+
+    def clear_todos(self) -> None:
+        self.todos = []
 
     def schemas(self) -> list[dict]:
         from foo_ai.skill import RUN_SKILL_SCHEMA
@@ -255,6 +460,10 @@ class Toolbox:
                 result = self._edit_file(raw)
             elif name == "shell":
                 result = self._shell(raw)
+            elif name == "todo_write":
+                result = self._todo_write(raw)
+            elif name == "ask":
+                result = self._ask(raw)
             elif name == "run_skill":
                 result = self._run_skill(raw)
             elif self.mcp is not None and self.mcp.knows(name):
@@ -517,6 +726,56 @@ class Toolbox:
         if self.skill_runner is None:
             return "error: skills are not available"
         return self.skill_runner(skill, arguments.strip())
+
+    def _todo_write(self, raw: object) -> str:
+        args = parse_arguments(raw)
+        if isinstance(args, str):
+            return args
+        if "todos" not in args:
+            return "error: todos is required"
+        todos = args["todos"]
+        if not isinstance(todos, list):
+            return "error: todos must be an array"
+        cleaned: list[dict] = []
+        seen: dict[str, int] = {}
+        counts = {"total": 0, "pending": 0, "in_progress": 0, "completed": 0}
+        for index, item in enumerate(todos):
+            if not isinstance(item, dict):
+                return f"error: todos[{index}] must be an object with content and status"
+            content = item.get("content")
+            if not isinstance(content, str) or content.strip() == "":
+                return f"error: todos[{index}].content must be a non-empty string"
+            content = content.strip()
+            if content in seen:
+                return (
+                    f"error: todos[{index}].content duplicates todos[{seen[content]}].content {content!r}"
+                )
+            seen[content] = index
+            status = item.get("status")
+            if status not in _TODO_STATUS:
+                return (
+                    f"error: todos[{index}].status {status!r} is invalid; "
+                    "use pending, in_progress, or completed"
+                )
+            cleaned.append({"content": content, "status": status})
+            counts[status] += 1
+        counts["total"] = len(cleaned)
+        self.todos = cleaned
+        return json.dumps({"todos": cleaned, "counts": counts}, ensure_ascii=False)
+
+    def _ask(self, raw: object) -> str:
+        args = parse_arguments(raw)
+        if isinstance(args, str):
+            return args
+        questions, error = normalize_questions(args.get("questions"))
+        if questions is None:
+            return error
+        if self.asker is None:
+            return ASK_NO_USER
+        answers = self.asker(questions)
+        if answers is None:
+            return ASK_NO_USER
+        return format_answers(questions, answers)
 
 
 def _offset(value: object) -> int:

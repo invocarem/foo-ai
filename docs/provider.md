@@ -68,7 +68,7 @@ Each completion is a streaming `POST` with no socket timeout. The client follows
 Build the JSON object in this order. A later step overwrites an earlier key of the same name. `extra_body` is a shallow update: a nested table replaces that key, it does not merge into it.
 
 1. `model`, `messages`, and `stream: true`.
-2. `tools`, only when the caller passed a list. The summary call passes no list, and the key is omitted. An empty list would send `"tools": []`. Normal rounds send the seven built-in tools plus MCP tools.
+2. `tools`, only when the caller passed a list. The summary call passes no list, and the key is omitted. An empty list would send `"tools": []`. Normal rounds send the nine built-in tools, then `run_skill` when a skill is loaded, then MCP tools.
 3. Shallow-merge `extra_body`.
 4. If `stream_options` is still absent, set it to `{"include_usage": true}`. An extra body that already set `stream_options` wins.
 

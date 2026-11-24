@@ -4,6 +4,9 @@ foo-ai.toml
 # Resumed conversations.
 .foo-ai/
 
+# Reasonix local data.
+.reasonix/
+
 # Local Python virtual environment.
 .venv/
 
@@ -15,3 +18,7 @@ __pycache__/
 
 # Editor swap files, which can hold a copy of foo-ai.toml.
 *.swp
+
+# Electron desktop shell: installed packages and built installers.
+desktop/node_modules/
+desktop/release/

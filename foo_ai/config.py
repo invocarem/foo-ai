@@ -335,3 +335,17 @@ def completions_url(base_url: str) -> str:
     if not url.endswith("/chat/completions"):
         url += "/chat/completions"
     return url
+
+
+def known_providers(directory: Path | None = None) -> list[str]:
+    """Every provider name the built-in catalog and the launch file define."""
+    catalog = _builtin_catalog()
+    path = (directory if directory is not None else Path.cwd()) / "foo-ai.toml"
+    try:
+        present = path.is_file()
+    except OSError as exc:
+        raise ConfigError(f"cannot read {path}: {exc}") from None
+    if present:
+        _load_file(catalog, path)
+    return sorted(catalog)
+

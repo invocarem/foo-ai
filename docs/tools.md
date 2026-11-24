@@ -1,6 +1,6 @@
 # Tools
 
-The model sees seven built-in tools: `read_file`, `list_dir`, `glob`, `grep`, `write_file`, `edit_file`, and `shell`. When at least one skill is loaded, `run_skill` follows those seven. Its schema and result text are in [Skills](skills.md). MCP servers add more after that; see [MCP](mcp.md). Send them as an OpenAI tool list. `list_dir` has no `required` array. The other six built-in tools do.
+The model sees nine built-in tools: `read_file`, `list_dir`, `glob`, `grep`, `write_file`, `edit_file`, `shell`, `todo_write`, and `ask`. When at least one skill is loaded, `run_skill` follows those nine. Its schema and result text are in [Skills](skills.md). MCP servers add more after that; see [MCP](mcp.md). Send them as an OpenAI tool list. `list_dir` has no `required` array. The other eight built-in tools do. A skill subagent still sees only the workspace tools named in its file, which are chosen from the first seven. See [Skills](skills.md).
 
 ```json
 [
@@ -105,6 +105,73 @@ The model sees seven built-in tools: `read_file`, `list_dir`, `glob`, `grep`, `w
           "command": {"type": "string", "description": "Command to execute."}
         },
         "required": ["command"]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "todo_write",
+      "description": "Replace this request's task list. Send the full list on every call. An empty list clears it. Each item has content and status: pending, in_progress, or completed.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "todos": {
+            "type": "array",
+            "description": "The complete task list. Replaces the previous list. [] clears it.",
+            "items": {
+              "type": "object",
+              "properties": {
+                "content": {"type": "string", "description": "Task text. Leading and trailing whitespace is removed."},
+                "status": {"type": "string", "enum": ["pending", "in_progress", "completed"]}
+              },
+              "required": ["content", "status"]
+            }
+          }
+        },
+        "required": ["todos"]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "ask",
+      "description": "Ask the user 1 to 3 multiple-choice questions when a decision is theirs to make and you cannot settle it from the request, the code, or a sensible default. Each question has a short header, the question text, 2 to 4 options, and multiSelect when more than one option may apply. Put any recommended option first. Do not use this for a decision with an obvious default.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "questions": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 3,
+            "description": "1 to 3 related questions to ask together.",
+            "items": {
+              "type": "object",
+              "properties": {
+                "header": {"type": "string", "description": "Very short label, such as Library."},
+                "question": {"type": "string", "description": "The full question."},
+                "options": {
+                  "type": "array",
+                  "minItems": 2,
+                  "maxItems": 4,
+                  "description": "The choices. Put any recommended option first.",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "label": {"type": "string", "description": "The choice text."},
+                      "description": {"type": "string", "description": "Optional one-line explanation."}
+                    },
+                    "required": ["label"]
+                  }
+                },
+                "multiSelect": {"type": "boolean", "description": "Allow selecting more than one option."}
+              },
+              "required": ["header", "question", "options"]
+            }
+          }
+        },
+        "required": ["questions"]
       }
     }
   }
@@ -238,3 +305,65 @@ A confirmed command runs through the system shell: `shell=True`, one command str
 Join stdout and then stderr, `rstrip` the combined text, and append the exit status. When the combined text is non-empty the result is `{text}\n[exit {code}]`. When it is empty the result is `[exit {code}]`.
 
 Stop the process after 120 seconds. Do not include partial output. The result is `error: Command '{command}' timed out after 120 seconds`.
+
+## todo_write
+
+`todos` is required and must be an array, or the result is `error: todos is required` or `error: todos must be an array`. An empty array clears the list. This is the only place the list is stored. It is not written to the session file except as this tool result.
+
+Each item must be an object. `content` must be a non-empty string after strip. `status` must be `pending`, `in_progress`, or `completed`. Any other status, including a missing one, returns `error: todos[{index}].status {Python repr} is invalid; use pending, in_progress, or completed`. A duplicate `content`, compared after strip, returns `error: todos[{index}].content duplicates todos[{earlier}].content {Python repr}`. Indexes are 0-based. Extra keys are ignored. A failed call leaves the previous list unchanged.
+
+On success the result is one JSON object, compact in the sense of `json.dumps` with its default spaces, with `ensure_ascii` left off:
+
+```json
+{"todos": [{"content": "ship", "status": "in_progress"}], "counts": {"total": 1, "pending": 0, "in_progress": 1, "completed": 0}}
+```
+
+`counts.total` is the number of items. The other three counts are how many items have that status. Key order is `todos`, then `counts`, and inside `counts` it is `total`, `pending`, `in_progress`, `completed`. Item order is the order sent. `content` is the stripped text.
+
+The list belongs to the current user request. Each user request, including a subagent slash command, clears it before the model runs. `/reset` clears it too. When a clear drops a non-empty list, the CLI prints the empty list. A successful `todo_write`, including a clear, prints the list as well.
+
+The CLI print is a leading newline, `Todos:`, then one line per item, `[ ]`, `[>]`, or `[x]`, a space, and the content. Pending is a space, in progress is `>`, completed is `x`. An empty list prints a leading newline and `Todos: (none)`. Flush after the block.
+
+## ask
+
+`questions` is required and must be an array of 1 to 3 objects. Fewer or more returns `error: questions must contain 1 to 3 items`. A missing or non-array value returns `error: questions is required`.
+
+Each question requires a non-empty `header`, a non-empty `question`, and `options` of 2 to 4 objects. Strip `header`, `question`, `label`, and `description`. An empty string after strip fails. `multiSelect` is optional and defaults to false. When it is present and not a boolean, the result is `error: questions[{index}].multiSelect must be a boolean`. Each option requires a non-empty `label`. `description` is optional. When it is present and not a string, the result is `error: questions[{index}].options[{index}].description must be a string`. Duplicate labels in one question, compared after strip, return `error: questions[{index}].options[{index}].label duplicates an earlier option`. Indexes are 0-based. The host assigns ids `q1`, `q2`, and `q3` in order.
+
+The CLI asks only when standard input is a terminal. `--yes` does not answer it. A pipe, including a one-shot prompt whose stdin is not a terminal, does not read stdin and does not print the choices. The tool result is this sentence:
+
+```text
+No interactive user answered. This is a model-assumption fallback, not a user answer. Proceed with your best judgment, state the assumption you made, and prefer the safest reversible option when choices differ in risk.
+```
+
+On a terminal, print each question before reading its answer. A leading newline, `? `, the header, a newline, the question, a newline, then one option per line: two spaces, the 1-based number, `. `, the label, and when the description is non-empty, ` - ` and the description. Then the prompt, with no extra newline before it:
+
+| `multiSelect` | Prompt |
+| --- | --- |
+| false | `Choose one [1-{count}]: ` |
+| true | `Choose any [1-{count}], comma-separated: ` |
+
+Flush, then read one line. A blank line leaves that question unanswered. EOF prints a newline and dismisses the whole batch, including questions already answered. A line that is not a valid choice prints an error, prints the same prompt again, and reads another line.
+
+| Line | Result |
+| --- | --- |
+| one in-range number | That option, for either mode. |
+| several in-range numbers, separated by commas or whitespace | Those options, in order, duplicates removed, only when `multiSelect` is true. |
+| several numbers when `multiSelect` is false | `Enter one number from 1 to {count}.` |
+| anything else that is not blank | `Enter a number from 1 to {count}.`, or for `multiSelect`, `Enter numbers from 1 to {count}, separated by commas.` |
+
+The tool result when at least one question has a selection:
+
+```text
+The user answered:
+- Library: requests
+- Scope: (left unanswered — don't assume a choice)
+```
+
+The header is the label before the colon. Selections are joined with `, `. A question with no selection uses `(left unanswered — don't assume a choice)`. Labels the user did not offer are dropped. When `multiSelect` is false, only the first remaining label is kept.
+
+When every question is unanswered, or the user hits EOF, the result is this sentence and the turn stops after the rest of the tool calls in that assistant message have run. Do not take another model round. Do not store another assistant message.
+
+```text
+The user dismissed the question without choosing — read this as "don't decide for me, let's just talk." Do not pick an option, run a tool, or take any further action toward this; stop and wait for the user's next message.
+```

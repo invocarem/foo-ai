@@ -120,6 +120,14 @@ class RestrictedToolbox:
         self.skill_runner = None
         self.workspace = inner.workspace
         self.confirm = inner.confirm
+        self.asker = None
+
+    def clear_todos(self) -> None:
+        self.inner.clear_todos()
+
+    @property
+    def todos(self) -> list[dict]:
+        return self.inner.todos
 
     def schemas(self) -> list[dict]:
         from foo_ai.tools import TOOL_SCHEMAS

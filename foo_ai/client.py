@@ -24,8 +24,9 @@ class Completion:
 
 
 class Client:
-    def __init__(self, provider: Provider):
+    def __init__(self, provider: Provider, timeout: float | None = None):
         self.provider = provider
+        self.timeout = timeout
 
     def complete(self, messages: list[dict], tools: list[dict] | None, sink) -> Completion:
         url = completions_url(self.provider.base_url)
@@ -49,7 +50,7 @@ class Client:
             headers["Authorization"] = f"Bearer {self.provider.api_key}"
         request = urllib.request.Request(url, data=body, headers=headers, method="POST")
         try:
-            response = urllib.request.urlopen(request)
+            response = urllib.request.urlopen(request, timeout=self.timeout)
         except urllib.error.HTTPError as exc:
             raw = exc.read()
             text = raw.decode("utf-8", "replace")[:2000]

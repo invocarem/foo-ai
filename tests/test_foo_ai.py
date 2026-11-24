@@ -534,7 +534,7 @@ class ToolTests(unittest.TestCase):
         names = [item["function"]["name"] for item in TOOL_SCHEMAS]
         self.assertEqual(
             list(names),
-            ["read_file", "list_dir", "glob", "grep", "write_file", "edit_file", "shell"],
+            ["read_file", "list_dir", "glob", "grep", "write_file", "edit_file", "shell", "todo_write", "ask"],
         )
         self.assertNotIn("required", TOOL_SCHEMAS[1]["function"]["parameters"])
         self.assertEqual(TOOL_SCHEMAS[0]["function"]["parameters"]["required"], ["path"])
@@ -746,6 +746,96 @@ class ToolTests(unittest.TestCase):
         self.assertEqual(denied.run("shell", {"command": "echo hi"}), "error: command not approved")
         self.assertEqual(self.box.run("shell", {"command": "  "}), "error: command is required")
 
+    def test_todo_write_replaces_the_list(self):
+        written = self.box.run(
+            "todo_write",
+            {
+                "todos": [
+                    {"content": "  inspect  ", "status": "completed", "note": "ignored"},
+                    {"content": "ship", "status": "in_progress"},
+                ]
+            },
+        )
+        self.assertEqual(
+            json.loads(written),
+            {
+                "todos": [
+                    {"content": "inspect", "status": "completed"},
+                    {"content": "ship", "status": "in_progress"},
+                ],
+                "counts": {"total": 2, "pending": 0, "in_progress": 1, "completed": 1},
+            },
+        )
+        self.assertEqual(self.box.todos[0]["content"], "inspect")
+        invalid = self.box.run("todo_write", {"todos": [{"content": "ship", "status": "later"}]})
+        self.assertEqual(
+            invalid,
+            "error: todos[0].status 'later' is invalid; use pending, in_progress, or completed",
+        )
+        self.assertEqual(len(self.box.todos), 2)
+        duplicate = self.box.run(
+            "todo_write",
+            {"todos": [{"content": "ship", "status": "pending"}, {"content": " ship ", "status": "completed"}]},
+        )
+        self.assertIn("duplicates todos[0].content 'ship'", duplicate)
+        self.assertEqual(self.box.run("todo_write", {}), "error: todos is required")
+        self.assertEqual(self.box.run("todo_write", {"todos": "no"}), "error: todos must be an array")
+        cleared = json.loads(self.box.run("todo_write", {"todos": []}))
+        self.assertEqual(cleared["todos"], [])
+        self.assertEqual(cleared["counts"]["total"], 0)
+        self.assertEqual(self.box.todos, [])
+
+    def test_ask_choices_and_fallback(self):
+        from foo_ai.tools import ASK_DISMISSED, ASK_NO_USER
+
+        payload = {
+            "questions": [
+                {
+                    "header": " Library ",
+                    "question": " Which library? ",
+                    "options": [
+                        {"label": " requests ", "description": " small "},
+                        {"label": "httpx"},
+                    ],
+                }
+            ]
+        }
+        self.assertEqual(self.box.run("ask", payload), ASK_NO_USER)
+        seen = []
+
+        def asker(questions):
+            seen.append(questions)
+            return [{"id": "q1", "selected": ["requests", "httpx"]}]
+
+        box = Toolbox(self.workspace, confirm=lambda command: True, asker=asker)
+        self.assertEqual(box.run("ask", payload), "The user answered:\n- Library: requests")
+        self.assertEqual(seen[0][0]["header"], "Library")
+        self.assertEqual(seen[0][0]["question"], "Which library?")
+        self.assertEqual(seen[0][0]["options"][0]["description"], "small")
+        self.assertFalse(seen[0][0]["multiSelect"])
+        dismissed = Toolbox(self.workspace, confirm=lambda command: True, asker=lambda questions: [])
+        self.assertEqual(dismissed.run("ask", payload), ASK_DISMISSED)
+        self.assertEqual(box.run("ask", {}), "error: questions is required")
+        self.assertEqual(
+            box.run(
+                "ask",
+                {"questions": [{"header": "H", "question": "Q", "options": [{"label": "only"}]}]},
+            ),
+            "error: questions[0].options must contain 2 to 4 items",
+        )
+        both = {
+            "questions": [
+                {
+                    "header": "Extras",
+                    "question": "Which extras?",
+                    "multiSelect": True,
+                    "options": [{"label": "tests"}, {"label": "docs"}],
+                }
+            ]
+        }
+        box.asker = lambda questions: [{"id": "q1", "selected": ["docs", "tests", "docs"]}]
+        self.assertEqual(box.run("ask", both), "The user answered:\n- Extras: docs, tests")
+
 
 class SessionTests(unittest.TestCase):
     def setUp(self):
@@ -951,6 +1041,141 @@ class AgentTests(unittest.TestCase):
         stored = [json.loads(line) for line in (workspace / ".foo-ai" / "session.jsonl").read_text(encoding="utf-8").splitlines()]
         self.assertEqual(stored[-1]["role"], "tool")
 
+    def test_open_todos_are_continued_then_cleared(self):
+        from foo_ai.agent import todo_nudge
+
+        pending = json.dumps({"todos": [{"content": "ship", "status": "in_progress"}]})
+        done = json.dumps({"todos": [{"content": "ship", "status": "completed"}]})
+        agent, session, sink, client, workspace = self._agent(
+            [
+                tool_call("todo_write", pending),
+                answer("not yet"),
+                tool_call("todo_write", done),
+                answer("Done."),
+                answer("next"),
+            ]
+        )
+        lists = []
+        sink.todos = lists.append
+        self.assertEqual(agent.ask("ship it"), "Done.")
+        notes = [
+            message["content"]
+            for message in session.messages
+            if message["role"] == "user" and str(message["content"]).startswith("[todo]")
+        ]
+        self.assertEqual(notes, [todo_nudge([{"content": "ship", "status": "in_progress"}])])
+        self.assertEqual(lists[-1], [{"content": "ship", "status": "completed"}])
+        self.assertEqual(agent.ask("another"), "next")
+        self.assertEqual(agent.toolbox.todos, [])
+        self.assertEqual(lists[-1], [])
+        self.assertEqual(client.seen[-1]["messages"][-1]["content"], "another")
+
+    def test_two_nudges_let_the_answer_stand(self):
+        pending = json.dumps({"todos": [{"content": "ship", "status": "pending"}]})
+        agent, session, sink, client, workspace = self._agent(
+            [
+                tool_call("todo_write", pending),
+                answer("one"),
+                answer("two"),
+                answer("three"),
+                answer("unused"),
+            ]
+        )
+        self.assertEqual(agent.ask("ship it"), "three")
+        self.assertEqual(len(client.rounds), 1)
+        notes = [
+            message
+            for message in session.messages
+            if message["role"] == "user" and str(message["content"]).startswith("[todo]")
+        ]
+        self.assertEqual(len(notes), 2)
+
+    def test_dismissed_ask_stops_and_an_answer_continues(self):
+        from foo_ai.tools import ASK_DISMISSED, ASK_NO_USER
+
+        raw = json.dumps(
+            {
+                "questions": [
+                    {
+                        "header": "Library",
+                        "question": "Which library?",
+                        "options": [{"label": "requests"}, {"label": "httpx"}],
+                    }
+                ]
+            }
+        )
+        agent, session, sink, client, workspace = self._agent(
+            [tool_call("ask", raw), answer("should not run")]
+        )
+        agent.toolbox.asker = lambda questions: []
+        self.assertEqual(agent.ask("pick"), ASK_DISMISSED)
+        self.assertEqual(len(client.rounds), 1)
+        self.assertEqual(session.messages[-1]["content"], ASK_DISMISSED)
+        agent, session, sink, client, workspace = self._agent(
+            [tool_call("ask", raw), answer("Using httpx.")]
+        )
+        self.assertEqual(agent.ask("pick"), "Using httpx.")
+        self.assertEqual(session.messages[-2]["content"], ASK_NO_USER)
+        agent, session, sink, client, workspace = self._agent(
+            [tool_call("ask", raw), answer("Using httpx.")]
+        )
+        agent.toolbox.asker = lambda questions: [{"id": "q1", "selected": ["httpx"]}]
+        self.assertEqual(agent.ask("pick"), "Using httpx.")
+        self.assertEqual(session.messages[-2]["content"], "The user answered:\n- Library: httpx")
+
+    def test_prompt_questions_and_hub_answer(self):
+        from foo_ai.cli import make_asker, prompt_questions
+        from foo_ai.gui.hub import Hub
+
+        questions = [
+            {
+                "id": "q1",
+                "header": "Library",
+                "question": "Which library?",
+                "multiSelect": False,
+                "options": [
+                    {"label": "requests", "description": "small"},
+                    {"label": "httpx", "description": ""},
+                ],
+            },
+            {
+                "id": "q2",
+                "header": "Extras",
+                "question": "Which extras?",
+                "multiSelect": True,
+                "options": [
+                    {"label": "tests", "description": ""},
+                    {"label": "docs", "description": "guides"},
+                ],
+            },
+        ]
+        stdout = io.StringIO()
+        answers = prompt_questions(questions, io.StringIO("9\n2\n1, 2\n"), stdout)
+        self.assertEqual(
+            answers,
+            [
+                {"id": "q1", "selected": ["httpx"]},
+                {"id": "q2", "selected": ["tests", "docs"]},
+            ],
+        )
+        self.assertIn("? Library\n", stdout.getvalue())
+        self.assertIn("  1. requests - small\n", stdout.getvalue())
+        self.assertIn("Enter a number from 1 to 2.", stdout.getvalue())
+        self.assertEqual(prompt_questions(questions[:1], io.StringIO(""), io.StringIO()), [])
+        with mock.patch("sys.stdin.isatty", return_value=False):
+            self.assertIsNone(make_asker()(questions))
+
+        hub = Hub(Path("."))
+        self.assertEqual(hub.answer([]), {"ok": False, "error": "no question is waiting for an answer"})
+        pending = {"questions": [{"id": "q1"}], "event": threading.Event(), "answers": None}
+        hub._question = pending
+        hub._todos = [{"content": "ship", "status": "pending"}]
+        self.assertEqual(hub.state()["todos"], [{"content": "ship", "status": "pending"}])
+        self.assertEqual(hub.events_after(0)["question"], [{"id": "q1"}])
+        self.assertEqual(hub.answer([{"id": "q1", "selected": ["requests"]}]), {"ok": True})
+        self.assertEqual(pending["answers"], [{"id": "q1", "selected": ["requests"]}])
+        self.assertTrue(pending["event"].is_set())
+
     def test_provider_error_does_not_save_a_partial_answer(self):
         class Partial(ChatError):
             pass
@@ -1006,7 +1231,7 @@ class ClientTests(unittest.TestCase):
                     body["chat_template_kwargs"],
                     {"reasoning_effort": "max", "thinking": True},
                 )
-                self.assertEqual(len(body["tools"]), 7)
+                self.assertEqual(len(body["tools"]), 9)
                 payload = sse(
                     json.dumps({"choices": [{"delta": {"reasoning_content": "think "}}]}),
                     json.dumps({"choices": [{"delta": {"content": "Hi"}}]}),
@@ -1426,7 +1651,18 @@ class SkillTests(unittest.TestCase):
         )
         self.assertEqual(
             [item["function"]["name"] for item in Toolbox(self.workspace, lambda command: True, skills=catalog).schemas()],
-            ["read_file", "list_dir", "glob", "grep", "write_file", "edit_file", "shell", "run_skill"],
+            [
+                "read_file",
+                "list_dir",
+                "glob",
+                "grep",
+                "write_file",
+                "edit_file",
+                "shell",
+                "todo_write",
+                "ask",
+                "run_skill",
+            ],
         )
         self._write_skill(
             "review",

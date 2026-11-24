@@ -89,7 +89,7 @@ With an archived file, print `Conversation cleared. Archived .foo-ai/session-YYY
 
 ## Interrupted tool calls
 
-A tool call has to be followed by a tool result with the same `tool_call_id` before the next non-tool message. Ctrl-C during a shell confirmation, or a crash after the assistant turn was saved, can leave the call unpaired.
+A tool call has to be followed by a tool result with the same `tool_call_id` before the next non-tool message. Ctrl-C during a shell confirmation or an `ask` prompt, or a crash after the assistant turn was saved, can leave the call unpaired.
 
 Walk the messages. An assistant message sets the pending ids to its tool-call ids, as strings, using `""` when an id is missing. A following tool message consumes the matching id. If its `tool_call_id` is not pending, it consumes the oldest pending id instead. When a non-tool message arrives while ids are still pending, insert one repair result per pending id before that message. Do the same for ids still pending at the end.
 

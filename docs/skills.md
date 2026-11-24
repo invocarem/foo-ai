@@ -88,7 +88,7 @@ Several names are comma-separated in catalog order: `Skills: /profile, /review.`
 
 ## run_skill
 
-`run_skill` is sent after the seven built-in schemas and before the MCP schemas. Its schema is stable for every skill:
+`run_skill` is sent after the nine built-in schemas and before the MCP schemas. Its schema is stable for every skill:
 
 ```json
 {

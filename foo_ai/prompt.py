@@ -10,6 +10,11 @@ SYSTEM_PROMPT = (
     "Change existing files with edit_file, using exact raw text that matches once. "
     "Use write_file only to create files.\n"
     "\n"
+    "When a task takes more than a couple of steps, call todo_write with the full list before you edit, "
+    "keep one item in_progress, mark items completed as you finish them, and do not give the final answer "
+    "while any item is still open. Call ask only for a decision you cannot settle from the request, the code, "
+    "or a sensible default, such as approach, scope, or something hard to undo. Otherwise pick the default and say so.\n"
+    "\n"
     "Reply in the same language as the user's latest message. Do not translate code, paths, or commands."
 )
 

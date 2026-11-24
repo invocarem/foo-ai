@@ -5,9 +5,19 @@ from __future__ import annotations
 from foo_ai.client import ChatError
 from foo_ai.context import Context
 from foo_ai.skill import render_inline, run_subagent
+from foo_ai.tools import ASK_DISMISSED
 from foo_ai.usage import format_usage_line, parse_usage
 
 _STOP = "Stopped: tool-call limit reached before a final answer."
+_NUDGE_LIMIT = 2
+
+
+def todo_nudge(items: list[dict]) -> str:
+    lines = "\n".join(f"- [{item['status']}] {item['content']}" for item in items)
+    return (
+        "[todo] Your task list still has open items. Continue the work, update the list with todo_write, "
+        "and do not give the final answer until every item is completed or you have removed it.\n" + lines
+    )
 
 
 class Agent:
@@ -19,10 +29,12 @@ class Agent:
         self.sink = sink
         self.max_steps = max_steps
         self.context = Context()
+        self._todo_nudges = 0
         self.toolbox.skill_runner = self._execute_skill
 
     def reset(self) -> str:
         self.context.ratio = 0.25
+        self._begin_request()
         return self.session.reset()
 
     def run_slash(self, command: str, name: str, arguments: str) -> str | None:
@@ -37,6 +49,7 @@ class Agent:
             if self.sink is not None:
                 self.sink.status(f"error: arguments are required for subagent skill {skill.name!r}\n")
             return None
+        self._begin_request()
         if self.session.repair():
             self.session.save()
         self.session.add_user(command)
@@ -78,6 +91,7 @@ class Agent:
         text = text.strip()
         if not text:
             return ""
+        self._begin_request()
         if self.session.repair():
             self.session.save()
         self.session.add_user(text)
@@ -101,7 +115,10 @@ class Agent:
             )
             self.session.save()
             if not completion.tool_calls:
+                if self._continue_for_todos():
+                    continue
                 return completion.content
+            dismissed = False
             for call in completion.tool_calls:
                 name = call["function"]["name"]
                 try:
@@ -110,8 +127,14 @@ class Agent:
                     raise
                 self.session.add_tool(call["id"], name, result)
                 self.session.save()
+                if name == "todo_write" and not result.startswith("error:"):
+                    self._publish_todos()
                 if self.sink is not None:
                     self.sink.tool_result(name, result)
+                if result == ASK_DISMISSED:
+                    dismissed = True
+            if dismissed:
+                return ASK_DISMISSED
         if self.max_steps > 0:
             return self._closing_answer()
         if self.sink is not None:
@@ -136,6 +159,27 @@ class Agent:
         self.session.add_assistant(completion.content, completion.reasoning_content, [])
         self.session.save()
         return completion.content
+
+    def _begin_request(self) -> None:
+        self._todo_nudges = 0
+        had = bool(self.toolbox.todos)
+        self.toolbox.clear_todos()
+        if had:
+            self._publish_todos()
+
+    def _publish_todos(self) -> None:
+        if self.sink is None or not hasattr(self.sink, "todos"):
+            return
+        self.sink.todos([dict(item) for item in self.toolbox.todos])
+
+    def _continue_for_todos(self) -> bool:
+        open_items = [item for item in self.toolbox.todos if item["status"] != "completed"]
+        if not open_items or self._todo_nudges >= _NUDGE_LIMIT:
+            return False
+        self._todo_nudges += 1
+        self.session.add_user(todo_nudge(open_items))
+        self.session.save()
+        return True
 
     def _report_usage(self, raw: object) -> None:
         if not isinstance(raw, dict) or self.sink is None:

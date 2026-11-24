@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Foo AI · coding agent</title>
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+<div class="app" id="app">
+
+  <header class="topbar">
+    <button class="icon" id="toggle-left" title="Collapse navigation ( [ )" aria-label="Collapse navigation" aria-pressed="true">
+      <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2 4h12M2 8h12M2 12h12"/></svg>
+    </button>
+    <div class="brand">
+      <span class="mark" aria-hidden="true"></span>
+      <span class="title">Foo AI</span>
+      <span class="sub">coding agent</span>
+    </div>
+
+    <div class="grow"></div>
+    <div class="meter" id="meter" title="context window">
+      <span class="meter-text" id="meter-text">–</span>
+      <span class="meter-track"><span class="meter-fill" id="meter-fill"></span></span>
+    </div>
+    <div class="status" id="status"><span class="led"></span><span id="status-text">ready</span></div>
+    <button class="icon" id="toggle-right" title="Collapse activity ( ] )" aria-label="Collapse activity" aria-pressed="true">
+      <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 3h10v10H3zM9 3v10"/></svg>
+    </button>
+  </header>
+
+  <main class="body" id="body">
+
+    <aside class="panel left" id="left">
+      <div class="side-body">
+        <section class="pane">
+          <div class="pane-head"><h2>Workspace</h2><span class="hint" id="workspace-hint"></span></div>
+          <form class="load" id="workspace-form" autocomplete="off">
+            <input id="workspace-path" type="text" spellcheck="false" placeholder="a project directory">
+            <button class="primary" type="submit">Open</button>
+          </form>
+          <div class="facts" id="workspace-facts"></div>
+        </section>
+
+        <section class="pane">
+          <div class="pane-head"><h2>Provider</h2><span class="hint">foo-ai.toml</span></div>
+          <label class="sheet-field tight"><span>name</span><select id="provider-select"></select></label>
+          <div class="facts small" id="provider-facts"></div>
+        </section>
+
+        <section class="pane" id="todos" hidden>
+          <div class="pane-head"><h2>Tasks</h2><span class="hint" id="todo-progress"></span></div>
+          <div class="todo-meter" aria-hidden="true"><span class="todo-fill" id="todo-fill"></span></div>
+          <ul class="todo-list" id="todo-list"></ul>
+        </section>
+
+        <section class="pane">
+          <div class="pane-head"><h2>Skills</h2><span class="hint">slash</span></div>
+          <div class="skills" id="skills"><p class="muted">No skills loaded.</p></div>
+        </section>
+
+        <section class="pane">
+          <div class="pane-head"><h2>Session</h2><span class="hint" id="session-hint"></span></div>
+          <div class="facts small" id="session-facts"></div>
+          <div class="row">
+            <button class="ghost" id="reset" type="button">New conversation</button>
+          </div>
+        </section>
+
+        <section class="pane" id="mcp-pane" hidden>
+          <div class="pane-head"><h2>MCP</h2></div>
+          <div class="facts small" id="mcp-facts"></div>
+        </section>
+      </div>
+
+      <footer class="side-foot">
+        <button class="gear" id="settings-open" type="button" title="Settings ( Ctrl+, )" aria-label="Settings">
+          <svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="2.2"/><path d="M8 1.7v1.6M8 12.7v1.6M1.7 8h1.6M12.7 8h1.6M3.6 3.6l1.1 1.1M11.3 11.3l1.1 1.1M12.4 3.6l-1.1 1.1M4.7 11.3l-1.1 1.1"/></svg>
+          <span>Settings</span>
+        </button>
+      </footer>
+    </aside>
+
+    <section class="stage" id="stage">
+      <div class="stage-head">
+        <div class="where" id="where"><span class="muted">No workspace.</span></div>
+        <label class="check"><input type="checkbox" id="show-thinking"><span>thinking</span></label>
+        <label class="check"><input type="checkbox" id="verbose"><span>verbose</span></label>
+        <label class="check"><input type="checkbox" id="auto-approve"><span>auto-approve</span></label>
+      </div>
+
+      <div class="transcript" id="transcript">
+        <div class="empty" id="transcript-empty">
+          <p>Ask Foo AI to read, change, or run something in the workspace.</p>
+          <p class="muted">It streams an answer, calls its tools, and asks before a shell command.
+            <b>/reset</b> starts a new conversation, and a loaded skill runs with <b>/name</b>.</p>
+        </div>
+      </div>
+
+      <div class="confirm" id="confirm" hidden>
+        <div class="confirm-head"><span class="kind">shell</span><span>Run this command?</span></div>
+        <pre class="confirm-command mono" id="confirm-command"></pre>
+        <div class="row">
+          <button class="ghost" id="confirm-deny" type="button">Deny</button>
+          <button class="primary" id="confirm-allow" type="button">Run</button>
+        </div>
+      </div>
+
+      <form class="composer" id="composer" autocomplete="off">
+        <textarea id="prompt" rows="2" spellcheck="false"
+                  placeholder="Ask for a change, or run a skill: /explore how does config load"></textarea>
+        <div class="composer-actions">
+          <button class="primary" id="send" type="submit">Send</button>
+          <button class="ghost" id="stop" type="button" hidden>Stop</button>
+        </div>
+      </form>
+
+      <div class="stage-foot" id="foot">
+        <span class="muted">Enter sends · Shift+Enter adds a line · <b>/reset</b> clears · <b>/exit</b> quits</span>
+      </div>
+    </section>
+
+    <aside class="panel right" id="right">
+      <div class="pane-head"><h2>Activity</h2><span class="hint" id="activity-hint"></span></div>
+      <div class="activity" id="activity"></div>
+    </aside>
+
+  </main>
+
+  <div class="sheet-layer" id="settings" hidden>
+    <div class="sheet-scrim" id="settings-scrim"></div>
+    <section class="sheet" role="dialog" aria-modal="true" aria-labelledby="settings-title">
+      <header class="sheet-head">
+        <h2 id="settings-title">Settings</h2>
+        <span class="sheet-hint" id="settings-hint"></span>
+        <button class="icon" id="settings-close" type="button" title="Close ( Esc )" aria-label="Close settings">
+          <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8"/></svg>
+        </button>
+      </header>
+      <form class="sheet-form" id="settings-form">
+        <div class="sheet-body">
+          <section class="sheet-pane">
+            <h3>Workspace</h3>
+            <p class="sheet-note">The directory the tools may read and write. <b>Open</b> reads its
+              <b>.foo-ai/session.jsonl</b> and its <b>.foo-ai/skills</b>.</p>
+            <label class="sheet-field"><span>folder</span>
+              <input id="settings-workspace" type="text" spellcheck="false" placeholder="a project directory">
+            </label>
+            <div class="facts small" id="settings-facts"></div>
+          </section>
+          <section class="sheet-pane">
+            <h3>Turn</h3>
+            <p class="sheet-note">What the page shows, and whether a shell command waits for you.</p>
+            <label class="check"><input type="checkbox" id="settings-thinking"><span>show thinking</span></label>
+            <label class="check"><input type="checkbox" id="settings-verbose"><span>verbose tool results</span></label>
+            <label class="check"><input type="checkbox" id="settings-yes"><span>run shell commands without asking</span></label>
+            <p class="sheet-note" id="settings-steps">step budget –</p>
+          </section>
+        </div>
+        <footer class="sheet-foot">
+          <span class="sheet-note" id="settings-note">Apply reads the workspace again.</span>
+          <button class="ghost" id="settings-cancel" type="button">Cancel</button>
+          <button class="primary" id="settings-apply" type="submit">Apply</button>
+        </footer>
+      </form>
+    </section>
+  </div>
+
+  <div class="sheet-layer" id="ask" hidden>
+    <div class="sheet-scrim" id="ask-scrim"></div>
+    <section class="sheet ask-sheet" role="dialog" aria-modal="true" aria-labelledby="ask-title">
+      <header class="sheet-head">
+        <h2 id="ask-title">Foo AI asks</h2>
+        <span class="sheet-hint" id="ask-hint"></span>
+        <button class="icon" id="ask-close" type="button" title="Dismiss ( Esc )" aria-label="Dismiss the question">
+          <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8"/></svg>
+        </button>
+      </header>
+      <form class="sheet-form" id="ask-form">
+        <div class="sheet-body ask-body" id="ask-body"></div>
+        <footer class="sheet-foot">
+          <span class="sheet-note">Dismiss sends no choice: Foo AI stops and waits for you.</span>
+          <button class="ghost" id="ask-dismiss" type="button">Dismiss</button>
+          <button class="primary" id="ask-send" type="submit">Send answer</button>
+        </footer>
+      </form>
+    </section>
+  </div>
+
+  <div class="toast" id="toast" hidden></div>
+  <div class="busy" id="busy" hidden><div class="spinner"></div><span id="busy-text">working…</span></div>
+</div>
+
+<script type="module" src="/static/app.js"></script>
+</body>
+</html>

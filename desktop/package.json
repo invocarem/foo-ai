@@ -1,0 +1,54 @@
+{
+  "name": "foo-ai-desktop",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Foo AI in its own window",
+  "main": "main.js",
+  "author": "Foo AI",
+  "scripts": {
+    "start": "electron .",
+    "dist": "electron-builder --win nsis"
+  },
+  "devDependencies": {
+    "electron": "45.3.4",
+    "electron-builder": "26.18.0"
+  },
+  "build": {
+    "appId": "io.foo-ai.desktop",
+    "productName": "Foo AI",
+    "executableName": "FooAI",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "../foo_ai",
+        "to": "foo-ai/foo_ai",
+        "filter": ["**/*", "!**/__pycache__/**"]
+      },
+      {
+        "from": "../pyproject.toml",
+        "to": "foo-ai/pyproject.toml"
+      },
+      {
+        "from": "../foo-ai.example.toml",
+        "to": "foo-ai/foo-ai.example.toml"
+      }
+    ],
+    "win": {
+      "target": ["nsis"],
+      "signAndEditExecutable": false
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "shortcutName": "Foo AI"
+    }
+  }
+}
