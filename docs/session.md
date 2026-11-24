@@ -10,11 +10,13 @@ The file is created on the first user message. A transcript that is only the sys
 
 Key order does not matter on load. These are the objects the agent writes.
 
-System, always message 0 while the process is running:
+System, always message 0 while the process is running. The content is the current system prompt, including the skill catalog when skills are loaded:
 
 ```json
 {"role": "system", "content": "You are Foo AI, a coding agent.\n..."}
 ```
+
+A subagent skill keeps its transcript in memory. Those messages are not appended here and are not written to another file. The parent stores the `run_skill` tool result. A slash invocation of a subagent stores the slash line as a user message and the child's answer as an assistant message. See [Skills](skills.md).
 
 User:
 

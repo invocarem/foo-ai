@@ -1,5 +1,9 @@
 default_provider = "home"
 
+# Model rounds for one request, including /review. Default 200.
+# A repository can set its own number in .foo-ai.toml.
+# max_steps = 200
+
 [providers.home]
 base_url = "http://127.0.0.1:8100/v1"
 model = "DeepSeek-V4.1-Flash-1017"

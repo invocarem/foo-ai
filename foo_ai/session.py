@@ -11,8 +11,8 @@ from foo_ai.prompt import SYSTEM_PROMPT
 _INTERRUPTED = "error: interrupted before the tool result was saved"
 
 
-def system_message() -> dict:
-    return {"role": "system", "content": SYSTEM_PROMPT}
+def system_message(content: str | None = None) -> dict:
+    return {"role": "system", "content": SYSTEM_PROMPT if content is None else content}
 
 
 def repair_messages(messages: list[dict]) -> bool:
@@ -64,15 +64,19 @@ def repair_messages(messages: list[dict]) -> bool:
 
 
 class Session:
-    def __init__(self, workspace: Path):
+    def __init__(self, workspace: Path, prompt: str | None = None):
         self.workspace = workspace
+        self.prompt = SYSTEM_PROMPT if prompt is None else prompt
         self.directory = workspace / ".foo-ai"
         self.path = self.directory / "session.jsonl"
-        self.messages: list[dict] = [system_message()]
+        self.messages: list[dict] = [self._system()]
         self.note: str | None = None
 
+    def _system(self) -> dict:
+        return system_message(self.prompt)
+
     def load(self) -> str | None:
-        self.messages = [system_message()]
+        self.messages = [self._system()]
         self.note = None
         if not self.path.exists():
             return None
@@ -101,9 +105,9 @@ class Session:
             self.path.unlink()
             return None
         if parsed[0].get("role") == "system":
-            parsed[0] = system_message()
+            parsed[0] = self._system()
         else:
-            parsed.insert(0, system_message())
+            parsed.insert(0, self._system())
         repair_messages(parsed)
         self.messages = parsed
         count = len(parsed) - 1
@@ -115,7 +119,7 @@ class Session:
         if broken.exists():
             broken.unlink()
         self.path.replace(broken)
-        self.messages = [system_message()]
+        self.messages = [self._system()]
         return "Session file was unreadable and was renamed to .foo-ai/session.jsonl.broken."
 
     def save(self) -> None:
@@ -160,7 +164,7 @@ class Session:
         return repair_messages(self.messages)
 
     def reset(self) -> str:
-        self.messages = [system_message()]
+        self.messages = [self._system()]
         if not self.path.exists():
             return "Conversation cleared."
         stamp = time.strftime("%Y%m%d-%H%M%S", time.localtime())

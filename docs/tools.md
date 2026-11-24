@@ -1,6 +1,6 @@
 # Tools
 
-The model sees six built-in tools: `read_file`, `list_dir`, `grep`, `write_file`, `edit_file`, and `shell`. MCP servers add more; see [MCP](mcp.md). Send them as an OpenAI tool list. `list_dir` has no `required` array. The other five do.
+The model sees six built-in tools: `read_file`, `list_dir`, `grep`, `write_file`, `edit_file`, and `shell`. When at least one skill is loaded, `run_skill` follows those six. Its schema and result text are in [Skills](skills.md). MCP servers add more after that; see [MCP](mcp.md). Send them as an OpenAI tool list. `list_dir` has no `required` array. The other five built-in tools do.
 
 ```json
 [

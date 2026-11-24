@@ -196,14 +196,21 @@ def _unified(old_lines: list[str], new_lines: list[str], posix_path: str) -> str
 
 
 class Toolbox:
-    def __init__(self, workspace: Path, confirm, mcp=None):
+    def __init__(self, workspace: Path, confirm, mcp=None, skills=None):
         self.workspace = workspace.resolve()
         self.confirm = confirm
         self.mcp = mcp
+        self.skills = skills
+        self.skill_runner = None
 
     def schemas(self) -> list[dict]:
+        from foo_ai.skill import RUN_SKILL_SCHEMA
+
         extra = self.mcp.schemas() if self.mcp is not None else []
-        return [*TOOL_SCHEMAS, *extra]
+        skill_schemas = []
+        if self.skills is not None and self.skills.entries:
+            skill_schemas = [RUN_SKILL_SCHEMA]
+        return [*TOOL_SCHEMAS, *skill_schemas, *extra]
 
     def run(self, name: str, raw: object) -> str:
         try:
@@ -219,6 +226,8 @@ class Toolbox:
                 result = self._edit_file(raw)
             elif name == "shell":
                 result = self._shell(raw)
+            elif name == "run_skill":
+                result = self._run_skill(raw)
             elif self.mcp is not None and self.mcp.knows(name):
                 result = self.mcp.call(name, raw)
             else:
@@ -302,10 +311,14 @@ class Toolbox:
         limited = False
         for file_path in files:
             try:
-                text = file_path.read_text(encoding="utf-8", errors="replace")
+                resolved_file = file_path.resolve()
+                relative = str(resolved_file.relative_to(self.workspace))
+            except (OSError, ValueError):
+                continue
+            try:
+                text = resolved_file.read_text(encoding="utf-8", errors="replace")
             except OSError:
                 continue
-            relative = str(file_path.resolve().relative_to(self.workspace))
             for number, line in enumerate(text.splitlines(), start=1):
                 if compiled.search(line):
                     matches.append(f"{relative}:{number}:{line}")
@@ -351,6 +364,11 @@ class Toolbox:
         args = parse_arguments(raw)
         if isinstance(args, str):
             return args
+        resolved = self._resolve(args.get("path", ""))
+        if isinstance(resolved, str):
+            return resolved
+        if not resolved.is_file():
+            return f"error: not a file: {_final_name(args.get('path', ''), resolved)}"
         old = args.get("old_string")
         if not isinstance(old, str) or old == "":
             return "error: old_string is required"
@@ -361,11 +379,6 @@ class Toolbox:
             return "error: new_string must be a string"
         if old == new:
             return "error: old_string and new_string are the same"
-        resolved = self._resolve(args.get("path", ""))
-        if isinstance(resolved, str):
-            return resolved
-        if not resolved.is_file():
-            return f"error: not a file: {_final_name(args.get('path', ''), resolved)}"
         with resolved.open("r", encoding="utf-8", newline="") as handle:
             text = handle.read()
         count = text.count(old)
@@ -396,6 +409,9 @@ class Toolbox:
             return "error: command is required"
         if not self.confirm(command):
             return "error: command not approved"
+        return self.execute_shell(command)
+
+    def execute_shell(self, command: str) -> str:
         proc = subprocess.Popen(
             command,
             shell=True,
@@ -428,6 +444,29 @@ class Toolbox:
         if combined:
             return f"{combined}\n[exit {proc.returncode}]"
         return f"[exit {proc.returncode}]"
+
+    def _run_skill(self, raw: object) -> str:
+        args = parse_arguments(raw)
+        if isinstance(args, str):
+            return args
+        if self.skills is None or not self.skills.entries:
+            return "error: unknown tool 'run_skill'"
+        name = args.get("name")
+        if not isinstance(name, str) or name.strip() == "":
+            return "error: name is required"
+        if "arguments" in args and not isinstance(args["arguments"], str):
+            return "error: arguments must be a string"
+        arguments = args.get("arguments")
+        if not isinstance(arguments, str):
+            arguments = ""
+        skill = self.skills.get(name.strip())
+        if skill is None:
+            return f"error: unknown skill {name.strip()!r}"
+        if skill.run == "subagent" and arguments.strip() == "":
+            return f"error: arguments are required for subagent skill {skill.name!r}"
+        if self.skill_runner is None:
+            return "error: skills are not available"
+        return self.skill_runner(skill, arguments.strip())
 
 
 def _offset(value: object) -> int:

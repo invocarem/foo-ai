@@ -21,6 +21,26 @@ Run Foo AI the same way as before: `foo-ai`, or `foo-ai --provider deepseek-flas
 
 If the whole `mcp` value is not a table, config fails with `mcp must be a table of servers, for example [mcp.whitaker]`. A server entry that is not a table fails with `mcp {name}: expected a table with command and args`. Enabled servers are kept in file order.
 
+## Workspace file
+
+A repository turns servers on or off without editing the launch file. After the launch `foo-ai.toml` is loaded, Foo AI reads `<workspace>/.foo-ai.toml` when that file exists and merges its `[mcp]` tables over the launch tables. The workspace is `--workspace`, already resolved. The default workspace is the launch directory, so a `.foo-ai.toml` beside `foo-ai.toml` still applies. A missing file changes nothing. `max_steps` in that file replaces the launch value, as [Agent loop](agent-loop.md) describes. Providers, `default_provider`, and every other key are ignored. API keys and the model stay in the launch file.
+
+```toml
+[mcp.whitaker]
+enabled = true
+```
+
+That turns on `whitaker` when the launch file already declared `command` and `args` with `enabled = false`. Restart Foo AI after changing either file. The workspace file is safe to commit. It does not hold the provider key.
+
+Merge rules:
+
+- A server name already in the launch file keeps its place. Keys present in the workspace table replace those keys. `env`, when present, replaces the whole environment table. Keys the workspace file omits stay as the launch file set them.
+- A server name only in the workspace file is appended after the launch servers, in the workspace file's order.
+- `enabled` has to be boolean `true` after the merge. `false`, a missing `enabled`, or any other value drops the server. A dropped server is not validated, so invalid `args` on a server the workspace file turns off do not fail config.
+- An enabled server is validated with the same rules as the launch file. A server the workspace file turns on still needs a `command`, from either file. A missing command fails with `mcp {name}: command is required`.
+
+The workspace file is parsed with `tomllib`. A syntax error fails with `.foo-ai.toml: ` plus the parser message. A root value that is not a table fails with `.foo-ai.toml must be a table`. When `mcp` is present and is not a table, the message is `.foo-ai.toml: mcp must be a table of servers, for example [mcp.whitaker]`. An unreadable file fails with `cannot read {path}: {error}`.
+
 Python speaking this protocol needs an unbuffered stdout. Inside Docker that is `python -u`. A buffered pipe holds the handshake response until the process exits, and launch then waits until the timeout.
 
 The child is not started through a shell. The argument vector is the command followed by `args`. Standard input, output, and error are pipes. Decode text as UTF-8 and replace invalid bytes. Read stdout and stderr on separate threads so a log line cannot stall the handshake. Keep the last 4,000 characters of stderr for the failure text.

@@ -43,7 +43,7 @@ foo-ai
 
 `requirements.txt` has no third-party packages. It installs this directory with `-e .`, which is the same as `pip install -e .`.
 
-Inside the session, `/reset` archives the conversation and starts a new one. `/exit` quits. The transcript is stored in `.foo-ai/session.jsonl` under the workspace and reloaded on the next launch. `--show-thinking` prints the model's reasoning. `--verbose` prints full tool output. `--yes` runs shell commands without asking.
+Inside the session, `/reset` archives the conversation and starts a new one. `/exit` quits. `/review` runs the built-in review skill, and `/review focus on auth` passes that remainder as its task. The transcript is stored in `.foo-ai/session.jsonl` under the workspace and reloaded on the next launch. `--show-thinking` prints the model's reasoning. `--verbose` prints full tool output. `--yes` runs shell commands without asking.
 
 Copy `foo-ai.example.toml` to `foo-ai.toml` in the launch directory to change providers. `foo-ai.toml` is local and holds API keys; do not commit it. `--provider` or `FOO_AI_PROVIDER` chooses a name. `FOO_AI_BASE_URL`, `FOO_AI_MODEL`, and `FOO_AI_API_KEY` override the selected provider.
 
@@ -59,11 +59,21 @@ The suite uses only the standard library. It does not call a model server.
 
 ## Tools
 
-`read_file`, `list_dir`, `grep`, `edit_file`, `write_file`, and `shell`. Paths stay inside `--workspace`, which defaults to the current directory. `foo-ai.toml` is read from the launch directory, which can differ from the workspace.
+`read_file`, `list_dir`, `grep`, `edit_file`, `write_file`, and `shell`, plus `run_skill` when a skill is loaded. Paths stay inside `--workspace`, which defaults to the current directory. `foo-ai.toml` is read from the launch directory, which can differ from the workspace. A repository can turn MCP servers on or off for itself with `.foo-ai.toml` in that workspace. The same file can set `max_steps` for that repository. One number covers the request and `/review`. `--max-steps` overrides it. When none of those is set, the budget is 200.
+
+A skill is a `SKILL.md` playbook. The package ships `review`. A file at `.foo-ai/skills/<name>/SKILL.md` adds a skill, or replaces the built-in of the same name, on the next launch. See [docs/skills.md](docs/skills.md).
 
 `edit_file` replaces one exact span of raw file text and prints a diff. It fails when that span is missing or matches more than once. `write_file` creates a new file and fails if the path already exists. `shell` prints the command and waits for `y` unless `--yes` is set. It runs in the workspace with a 120 second timeout.
 
-The launch command does not change. `foo-ai` and `foo-ai --provider deepseek-flash_1` are the same with or without MCP. A server in `foo-ai.toml` starts only when `enabled = true`, then its tools are added as `mcp__<name>__<tool>`. Leave it `false` until you want those tools, and restart after changing it. See [docs/mcp.md](docs/mcp.md).
+The launch command does not change. `foo-ai` and `foo-ai --provider deepseek-flash_1` are the same with or without MCP. A server in `foo-ai.toml` starts only when `enabled = true`, then its tools are added as `mcp__<name>__<tool>`. Leave it `false` in the launch file, and turn it on for one repository with `.foo-ai.toml` in that workspace. Restart after changing either file. See [docs/mcp.md](docs/mcp.md).
+
+```toml
+# lectio-latin-reader/.foo-ai.toml
+[mcp.whitaker]
+enabled = true
+```
+
+The launch file still holds the command:
 
 ```toml
 [mcp.whitaker]

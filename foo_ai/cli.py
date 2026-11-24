@@ -11,6 +11,7 @@ from foo_ai.client import ChatError, Client
 from foo_ai.config import ConfigError, load_config
 from foo_ai.mcp import McpPool
 from foo_ai.session import Session
+from foo_ai.skill import load_skills, match_slash, skills_banner, system_prompt
 from foo_ai.tools import Toolbox
 
 
@@ -51,7 +52,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="foo-ai", allow_abbrev=False)
     parser.add_argument("prompt", nargs="*")
     parser.add_argument("--workspace", default=None)
-    parser.add_argument("--max-steps", type=int, default=16)
+    parser.add_argument("--max-steps", type=int, default=None)
     parser.add_argument("--show-thinking", action="store_true")
     parser.add_argument("--verbose", action="store_true")
     parser.add_argument("--yes", action="store_true")
@@ -74,8 +75,12 @@ def main(argv: list[str] | None = None) -> int:
     if args.version:
         print("Foo AI 0.1.0", flush=True)
         return 0
+    if args.max_steps is not None and args.max_steps <= 0:
+        sys.stderr.write("max_steps must be a positive integer\n")
+        return 1
+    workspace = Path(args.workspace).expanduser().resolve() if args.workspace else Path.cwd().resolve()
     try:
-        config = load_config(args.provider)
+        config = load_config(args.provider, workspace=workspace)
     except ConfigError as exc:
         sys.stderr.write(f"{exc}\n")
         return 1
@@ -87,8 +92,10 @@ def main(argv: list[str] | None = None) -> int:
             sys.stdout.write("\n")
             sys.stdout.flush()
             return 1
-        workspace = Path(args.workspace).expanduser().resolve() if args.workspace else Path.cwd().resolve()
-        session = Session(workspace)
+        skills = load_skills(workspace)
+        for line in skills.skipped:
+            sys.stderr.write(line)
+        session = Session(workspace, prompt=system_prompt(skills))
         note = session.load()
         if note:
             print(note, flush=True)
@@ -98,15 +105,18 @@ def main(argv: list[str] | None = None) -> int:
         agent = Agent(
             provider=config.provider,
             session=session,
-            toolbox=Toolbox(workspace, _confirmer(args.yes), pool),
+            toolbox=Toolbox(workspace, _confirmer(args.yes), pool, skills),
             client=Client(config.provider),
             sink=CliSink(args.show_thinking, args.verbose),
-            max_steps=args.max_steps,
+            max_steps=args.max_steps if args.max_steps is not None else config.max_steps,
         )
         if args.prompt:
             return _one_shot(agent, " ".join(args.prompt))
         print(f"Workspace {workspace}", flush=True)
         print("/exit to quit, /reset to clear the conversation.", flush=True)
+        banner = skills_banner(skills)
+        if banner:
+            print(banner, flush=True)
         return _interactive(agent)
     finally:
         pool.close()
@@ -171,6 +181,23 @@ def _interactive(agent: Agent) -> int:
             return 0
         if command == "/reset":
             print(agent.reset(), flush=True)
+            continue
+        matched = match_slash(command, agent.toolbox.skills)
+        if matched is not None:
+            name, arguments = matched
+            try:
+                outcome = agent.run_slash(command, name, arguments)
+            except ChatError as exc:
+                sys.stderr.write(f"\n{exc}\n")
+                continue
+            except KeyboardInterrupt:
+                sys.stdout.write("\nInterrupted.\n")
+                sys.stdout.flush()
+                continue
+            if outcome is None:
+                continue
+            sys.stdout.write("\n")
+            sys.stdout.flush()
             continue
         try:
             agent.ask(line)

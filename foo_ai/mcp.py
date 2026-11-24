@@ -386,6 +386,7 @@ class McpProcess:
     def _fail(self, text: str | None = None) -> None:
         if text is None:
             text = self._closed_text()
+        text = one_line(text)
         with self.state_lock:
             if self.failure is None:
                 self.failure = text

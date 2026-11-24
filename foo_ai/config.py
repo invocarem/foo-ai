@@ -38,6 +38,7 @@ class McpSpec:
 class Config:
     provider: Provider
     mcp_servers: list[McpSpec] = field(default_factory=list)
+    max_steps: int = 200
 
 
 _HOME_URL = "http://127.0.0.1:8100/v1"
@@ -181,15 +182,78 @@ def _parse_mcp(data: dict) -> list[McpSpec]:
     return servers
 
 
-def _load_file(catalog: dict[str, Provider], path: Path) -> tuple[str, list[McpSpec]]:
-    default_name = "home"
+def _read_toml(path: Path) -> dict:
     try:
         with path.open("rb") as handle:
             data = tomllib.load(handle)
     except tomllib.TOMLDecodeError as exc:
         raise ConfigError(str(exc)) from None
+    except OSError as exc:
+        raise ConfigError(f"cannot read {path}: {exc}") from None
     if not isinstance(data, dict):
-        raise ConfigError("foo-ai.toml must be a table")
+        raise ConfigError(f"{path.name} must be a table")
+    return data
+
+
+def _mcp_table(data: dict) -> dict:
+    if "mcp" not in data:
+        return {}
+    table = data["mcp"]
+    if not isinstance(table, dict):
+        raise ConfigError("mcp must be a table of servers, for example [mcp.whitaker]")
+    return table
+
+
+def _merge_mcp(base: dict, overlay: dict) -> dict:
+    merged = dict(base)
+    for name, entry in overlay.items():
+        current = merged.get(name)
+        if isinstance(current, dict) and isinstance(entry, dict):
+            combined = dict(current)
+            combined.update(entry)
+            merged[name] = combined
+        else:
+            merged[name] = entry
+    return merged
+
+
+def _parse_max_steps(data: dict, source: str | None) -> int | None:
+    if "max_steps" not in data:
+        return None
+    value = data["max_steps"]
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        message = "max_steps must be a positive integer"
+        if source:
+            message = f"{source}: {message}"
+        raise ConfigError(message)
+    return value
+
+
+def _workspace_settings(workspace: Path) -> tuple[dict, int | None]:
+    path = workspace / ".foo-ai.toml"
+    try:
+        present = path.is_file()
+    except OSError as exc:
+        raise ConfigError(f"cannot read {path}: {exc}") from None
+    if not present:
+        return {}, None
+    try:
+        data = _read_toml(path)
+    except ConfigError as exc:
+        text = str(exc)
+        if text.startswith("cannot read ") or text.startswith(".foo-ai.toml"):
+            raise
+        raise ConfigError(f".foo-ai.toml: {text}") from None
+    try:
+        table = _mcp_table(data)
+    except ConfigError as exc:
+        raise ConfigError(f".foo-ai.toml: {exc}") from None
+    return table, _parse_max_steps(data, ".foo-ai.toml")
+
+
+def _load_file(catalog: dict[str, Provider], path: Path) -> tuple[str, dict, int | None]:
+    default_name = "home"
+    data = _read_toml(path)
     if isinstance(data.get("default_provider"), str) and data["default_provider"].strip():
         default_name = data["default_provider"].strip()
     providers = data.get("providers")
@@ -213,16 +277,33 @@ def _load_file(catalog: dict[str, Provider], path: Path) -> tuple[str, list[McpS
         else:
             target = default_name
         _apply_fields(_ensure(catalog, target), legacy)
-    return default_name, _parse_mcp(data)
+    return default_name, _mcp_table(data), _parse_max_steps(data, None)
 
 
-def load_config(provider_flag: str | None = None, directory: Path | None = None) -> Config:
+def load_config(
+    provider_flag: str | None = None,
+    directory: Path | None = None,
+    workspace: Path | None = None,
+) -> Config:
     catalog = _builtin_catalog()
     default_name = "home"
-    servers: list[McpSpec] = []
+    servers: dict = {}
+    max_steps = 200
     path = (directory if directory is not None else Path.cwd()) / "foo-ai.toml"
-    if path.is_file():
-        default_name, servers = _load_file(catalog, path)
+    try:
+        present = path.is_file()
+    except OSError as exc:
+        raise ConfigError(f"cannot read {path}: {exc}") from None
+    if present:
+        default_name, servers, file_steps = _load_file(catalog, path)
+        if file_steps is not None:
+            max_steps = file_steps
+    if workspace is not None:
+        overlay, workspace_steps = _workspace_settings(workspace)
+        servers = _merge_mcp(servers, overlay)
+        if workspace_steps is not None:
+            max_steps = workspace_steps
+    parsed = _parse_mcp({"mcp": servers}) if servers else []
 
     selected = ""
     if isinstance(provider_flag, str) and provider_flag.strip():
@@ -246,7 +327,7 @@ def load_config(provider_flag: str | None = None, directory: Path | None = None)
         provider.model = model
     if "FOO_AI_API_KEY" in os.environ:
         provider.api_key = os.environ["FOO_AI_API_KEY"]
-    return Config(provider=provider, mcp_servers=servers)
+    return Config(provider=provider, mcp_servers=parsed, max_steps=max_steps)
 
 
 def completions_url(base_url: str) -> str:

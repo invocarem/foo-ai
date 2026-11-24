@@ -20,6 +20,8 @@ After a normal model round reports usage, replace `0.25` with `prompt_tokens / c
 
 `context_window` of `0` or below turns this whole procedure off. Send the stored transcript.
 
+A subagent skill fits a separate in-memory transcript with this same procedure. That fit does not write the session file. Its ratio starts at `0.25` and does not read or change the parent conversation's ratio. `/reset` still sets only the parent ratio back to `0.25`. Child status lines are prefixed as [Skills](skills.md) describes.
+
 ## Trigger
 
 The only automatic trigger is 80% of the provider context window, the same rule Reasonix uses for `compact_ratio`:

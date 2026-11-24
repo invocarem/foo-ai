@@ -14,3 +14,6 @@ foo-ai = "foo_ai.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["foo_ai*"]
+
+[tool.setuptools.package-data]
+foo_ai = ["skills/*/SKILL.md"]

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import http.client
 import json
 import urllib.error
 import urllib.request
@@ -60,12 +61,19 @@ class Client:
         try:
             content_type = response.headers.get("Content-Type", "")
             lowered = content_type.lower()
-            if "application/json" in lowered and "text/event-stream" not in lowered:
+            json_body = "application/json" in lowered and "text/event-stream" not in lowered
+            if json_body:
                 text = response.read().decode("utf-8", "replace")
-                return _completion_from_json(text)
-            return _read_sse(response, sink)
+                completion = _completion_from_json(text)
+            else:
+                completion = _read_sse(response, sink)
+        except (OSError, http.client.HTTPException) as exc:
+            raise ChatError(f"cannot reach {url}: {exc}") from None
         finally:
             response.close()
+        if json_body:
+            _replay(completion, sink)
+        return completion
 
 
 def _completion_from_json(text: str) -> Completion:
@@ -110,7 +118,7 @@ def _normalize_calls(calls: object) -> list[dict]:
     if not isinstance(calls, list):
         return []
     result: list[dict] = []
-    for index, call in enumerate(calls):
+    for call in calls:
         if not isinstance(call, dict):
             continue
         function = call.get("function") if isinstance(call.get("function"), dict) else {}
@@ -126,7 +134,7 @@ def _normalize_calls(calls: object) -> list[dict]:
             argument_text = json.dumps(arguments)
         call_id = call.get("id")
         if not isinstance(call_id, str) or call_id == "":
-            call_id = f"call_{index}"
+            call_id = f"call_{len(result)}"
         result.append(
             {
                 "id": call_id,
@@ -135,6 +143,20 @@ def _normalize_calls(calls: object) -> list[dict]:
             }
         )
     return result
+
+
+def _replay(completion: Completion, sink) -> None:
+    """Print a finished body that was not streamed, as the streamed chunks would have been."""
+    if sink is None:
+        return
+    if completion.reasoning_content:
+        sink.reasoning(completion.reasoning_content)
+    if completion.content:
+        sink.content(completion.content)
+    for call in completion.tool_calls:
+        name = call["function"]["name"]
+        if name:
+            sink.tool_name(name)
 
 
 def _read_sse(response, sink) -> Completion:
@@ -199,15 +221,7 @@ def _read_sse(response, sink) -> Completion:
         except json.JSONDecodeError:
             raise ChatError("server closed the stream without a completed response") from None
         completion = _completion_from_body(body, blob)
-        if sink is not None:
-            if completion.reasoning_content:
-                sink.reasoning(completion.reasoning_content)
-            if completion.content:
-                sink.content(completion.content)
-            for call in completion.tool_calls:
-                name = call["function"]["name"]
-                if name:
-                    sink.tool_name(name)
+        _replay(completion, sink)
         return completion
 
     tool_calls = []

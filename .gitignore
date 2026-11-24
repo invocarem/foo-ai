@@ -12,3 +12,6 @@ __pycache__/
 
 # Setuptools metadata (e.g. foo_ai.egg-info/).
 *.egg-info/
+
+# Editor swap files, which can hold a copy of foo-ai.toml.
+*.swp

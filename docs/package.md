@@ -20,6 +20,8 @@ foo_ai/config.py        # providers and MCP tables
 foo_ai/context.py       # compress, summary, and discard
 foo_ai/session.py       # .foo-ai/session.jsonl
 foo_ai/tools.py         # the six built-in tools
+foo_ai/skill.py         # skill files, run_skill, and subagent runs
+foo_ai/skills/review/SKILL.md
 foo_ai/mcp.py           # stdio MCP
 foo_ai/usage.py         # usage parsing and the context line
 ```
@@ -57,6 +59,9 @@ foo-ai = "foo_ai.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["foo_ai*"]
+
+[tool.setuptools.package-data]
+foo_ai = ["skills/*/SKILL.md"]
 ```
 
 `.gitignore`:
@@ -72,14 +77,15 @@ foo-ai.toml
 ## Process order
 
 1. Parse arguments. See [Agent loop](agent-loop.md).
-2. Load the provider and the MCP server list from `foo-ai.toml` in the process's current directory. That directory is the launch directory. It can differ from `--workspace`. A config error prints its message on standard error and exits 1, before any server starts and before the banner.
-3. Start each enabled MCP server. Ctrl-C during startup prints a newline and exits 1. Servers are stopped when the process exits, including after an error. See [MCP](mcp.md).
-4. Resolve `--workspace` to an absolute path and load `.foo-ai/session.jsonl` from it. See [Session](session.md).
-5. Print the session note, if there is one, then the banner, then one MCP line per server that was started or that failed.
-6. Run one prompt, or the interactive loop.
+2. Resolve `--workspace` to an absolute path. The default is the current directory.
+3. Load the provider, the step budget, and the MCP server list from `foo-ai.toml` in the process's current directory. That directory is the launch directory. It can differ from `--workspace`. When `<workspace>/.foo-ai.toml` exists, merge its `[mcp]` tables over that list and let its `max_steps` replace the launch value. `--max-steps` replaces both. A config error prints its message on standard error and exits 1, before any server starts and before the banner.
+4. Start each enabled MCP server. Ctrl-C during startup prints a newline and exits 1. Servers are stopped when the process exits, including after an error. See [MCP](mcp.md).
+5. Load skills from the package and from `.foo-ai/skills` in the workspace. Print each skip line on standard error. Then load `.foo-ai/session.jsonl`. The system prompt includes the skill catalog. See [Skills](skills.md) and [Session](session.md).
+6. Print the session note, if there is one, then the banner, then one MCP line per server that was started or that failed.
+7. Run one prompt, or the interactive loop.
 
-The workspace used by every tool is that resolved path. `foo-ai.toml` is never read from the workspace unless the workspace happens to be the launch directory.
+The workspace used by every tool is that resolved path. `foo-ai.toml` is read from the launch directory. `<workspace>/.foo-ai.toml` is read from the workspace and only adjusts MCP servers. See [MCP](mcp.md).
 
 ## What the model must see
 
-Every normal model round sends the same tool list: the six built-in schemas, then the MCP schemas connected at startup, in server order and tool-list order. The summary call sends no `tools` key at all. Assistant messages that remain in the transcript keep `reasoning_content`. Those two rules are what keep a thinking model from rejecting the next request.
+Every normal model round sends the same tool list: the six built-in schemas, then `run_skill` when at least one skill is loaded, then the MCP schemas connected at startup, in server order and tool-list order. The summary call and the closing round after the step limit send no `tools` key at all. See [Agent loop](agent-loop.md). Assistant messages that remain in the transcript keep `reasoning_content`. Those two rules are what keep a thinking model from rejecting the next request. A skill subagent sends only its allowed built-in tools. See [Skills](skills.md).

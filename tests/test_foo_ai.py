@@ -20,13 +20,14 @@ sys.path.insert(0, str(ROOT))
 
 from foo_ai import __version__
 from foo_ai.agent import Agent
-from foo_ai.cli import main
-from foo_ai.client import ChatError, Client, Completion
+from foo_ai.cli import build_parser, main
+from foo_ai.client import ChatError, Client, Completion, _normalize_calls
 from foo_ai.config import ConfigError, Provider, completions_url, load_config
 from foo_ai.context import Context, transcript_chars
 from foo_ai.mcp import McpPool, advertise_name, render_tool_result
 from foo_ai.prompt import SYSTEM_PROMPT
 from foo_ai.session import Session
+from foo_ai.skill import RestrictedToolbox, command_allowed, load_skills, skills_banner, system_prompt
 from foo_ai.tools import TOOL_SCHEMAS, Toolbox, parse_arguments
 from foo_ai.usage import compact, format_usage_line, parse_usage
 
@@ -181,6 +182,7 @@ def sse(*events: str) -> bytes:
 
 class PackageTests(unittest.TestCase):
     def test_version_and_prompt(self):
+        self.assertIsNone(build_parser().get_default("max_steps"))
         self.assertEqual(__version__, "0.1.0")
         self.assertFalse(SYSTEM_PROMPT.endswith("\n"))
         self.assertTrue(SYSTEM_PROMPT.startswith("You are Foo AI, a coding agent.\n"))
@@ -200,6 +202,17 @@ class PackageTests(unittest.TestCase):
         self.assertEqual(result.stdout, "Foo AI 0.1.0\n")
         result = run_cli(["--not-a-flag"], Path(tempfile.mkdtemp()))
         self.assertEqual(result.returncode, 2)
+        result = run_cli(["--max-steps", "0"], Path(tempfile.mkdtemp()))
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.stderr, "max_steps must be a positive integer\n")
+
+    def test_workspace_config_error_exits_before_banner(self):
+        with tempfile.TemporaryDirectory() as launch, tempfile.TemporaryDirectory() as workspace:
+            (Path(workspace) / ".foo-ai.toml").write_text("[mcp.bad]\nenabled = true\n", encoding="utf-8")
+            result = run_cli(["--workspace", workspace], Path(launch))
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.stderr, "mcp bad: command is required\n")
+        self.assertNotIn("Foo AI", result.stdout)
 
     def test_interactive_exit_and_reset(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -208,6 +221,7 @@ class PackageTests(unittest.TestCase):
         self.assertIn("Foo AI · home · DeepSeek-V4.1-Flash-1017\n", result.stdout)
         self.assertIn("Workspace ", result.stdout)
         self.assertIn("/exit to quit, /reset to clear the conversation.\n", result.stdout)
+        self.assertIn("Skills: /review.\n", result.stdout)
         self.assertIn("\n> ", result.stdout)
         self.assertIn("Conversation cleared.\n", result.stdout)
 
@@ -336,6 +350,119 @@ PYTHONUNBUFFERED = "1"
                 with self.assertRaises(ConfigError) as caught:
                     load_config(directory=path)
             self.assertEqual(str(caught.exception), message)
+
+    def test_workspace_mcp_overlay(self):
+        launch = """
+default_provider = "home"
+
+[providers.home]
+model = "from-launch"
+
+[mcp.whitaker]
+enabled = false
+command = "docker"
+args = ["exec", "-i", "whitaker-mcp", "python"]
+timeout_seconds = 120
+
+[mcp.demo]
+enabled = true
+command = "python"
+args = ["demo.py"]
+
+[mcp.demo.env]
+KEEP = "1"
+
+[mcp.broken]
+enabled = true
+command = "python"
+args = [true]
+"""
+        overlay = """
+default_provider = "deepseek-flash_1"
+
+[providers.home]
+model = "from-workspace"
+
+[mcp.whitaker]
+enabled = true
+
+[mcp.demo.env]
+ADDED = "3"
+
+[mcp.broken]
+enabled = false
+
+[mcp.extra]
+enabled = true
+command = "python"
+args = ["extra.py"]
+timeout_seconds = 15
+
+[mcp.skip]
+enabled = 1
+args = [true]
+"""
+        with tempfile.TemporaryDirectory() as launch_dir, tempfile.TemporaryDirectory() as workspace_dir:
+            launch_path = Path(launch_dir)
+            workspace = Path(workspace_dir)
+            (launch_path / "foo-ai.toml").write_text(
+                '[mcp.demo]\nenabled = true\ncommand = "python"\nargs = ["demo.py"]\n',
+                encoding="utf-8",
+            )
+            untouched = load_config(directory=launch_path, workspace=workspace)
+            self.assertEqual([server.name for server in untouched.mcp_servers], ["demo"])
+            (launch_path / "foo-ai.toml").write_text(launch, encoding="utf-8")
+            (workspace / ".foo-ai.toml").write_text(overlay, encoding="utf-8")
+            config = load_config(directory=launch_path, workspace=workspace)
+        self.assertEqual(config.provider.name, "home")
+        self.assertEqual(config.provider.model, "from-launch")
+        self.assertEqual([server.name for server in config.mcp_servers], ["whitaker", "demo", "extra"])
+        whitaker = config.mcp_servers[0]
+        self.assertEqual(whitaker.command, "docker")
+        self.assertEqual(whitaker.args, ["exec", "-i", "whitaker-mcp", "python"])
+        self.assertEqual(whitaker.timeout, 120)
+        self.assertEqual(config.mcp_servers[1].env, {"ADDED": "3"})
+        self.assertEqual(config.mcp_servers[2].args, ["extra.py"])
+        self.assertEqual(config.mcp_servers[2].timeout, 15)
+
+    def test_workspace_mcp_overlay_errors(self):
+        with tempfile.TemporaryDirectory() as launch_dir, tempfile.TemporaryDirectory() as workspace_dir:
+            launch_path = Path(launch_dir)
+            workspace = Path(workspace_dir)
+            (launch_path / "foo-ai.toml").write_text('default_provider = "home"\n', encoding="utf-8")
+            (workspace / ".foo-ai.toml").write_text("this is not toml {\n", encoding="utf-8")
+            with self.assertRaises(ConfigError) as caught:
+                load_config(directory=launch_path, workspace=workspace)
+            self.assertTrue(str(caught.exception).startswith(".foo-ai.toml: "))
+            (workspace / ".foo-ai.toml").write_text("mcp = []\n", encoding="utf-8")
+            with self.assertRaises(ConfigError) as caught:
+                load_config(directory=launch_path, workspace=workspace)
+            self.assertEqual(
+                str(caught.exception),
+                ".foo-ai.toml: mcp must be a table of servers, for example [mcp.whitaker]",
+            )
+            (workspace / ".foo-ai.toml").write_text("[mcp.whitaker]\nenabled = true\n", encoding="utf-8")
+            with self.assertRaises(ConfigError) as caught:
+                load_config(directory=launch_path, workspace=workspace)
+            self.assertEqual(str(caught.exception), "mcp whitaker: command is required")
+
+    def test_max_steps_from_files(self):
+        with tempfile.TemporaryDirectory() as launch_dir, tempfile.TemporaryDirectory() as workspace_dir:
+            launch = Path(launch_dir)
+            workspace = Path(workspace_dir)
+            self.assertEqual(load_config(directory=launch, workspace=workspace).max_steps, 200)
+            (launch / "foo-ai.toml").write_text("max_steps = 50\n", encoding="utf-8")
+            self.assertEqual(load_config(directory=launch, workspace=workspace).max_steps, 50)
+            (workspace / ".foo-ai.toml").write_text("max_steps = 80\n", encoding="utf-8")
+            self.assertEqual(load_config(directory=launch, workspace=workspace).max_steps, 80)
+            (workspace / ".foo-ai.toml").write_text("max_steps = 0\n", encoding="utf-8")
+            with self.assertRaises(ConfigError) as caught:
+                load_config(directory=launch, workspace=workspace)
+            self.assertEqual(str(caught.exception), ".foo-ai.toml: max_steps must be a positive integer")
+            (launch / "foo-ai.toml").write_text("max_steps = true\n", encoding="utf-8")
+            with self.assertRaises(ConfigError) as caught:
+                load_config(directory=launch)
+            self.assertEqual(str(caught.exception), "max_steps must be a positive integer")
 
     def test_completions_url(self):
         self.assertEqual(
@@ -504,6 +631,26 @@ class ToolTests(unittest.TestCase):
         self.assertEqual(result.count("\n"), 50)
         self.assertTrue(result.endswith("\n…[match limit reached]"))
         self.assertEqual(len(result.splitlines()) - 1, 50)
+
+    def test_grep_skips_symlinks_that_leave_the_workspace(self):
+        (self.workspace / "inside.txt").write_text("needle\n", encoding="utf-8", newline="\n")
+        outside = tempfile.TemporaryDirectory()
+        self.addCleanup(outside.cleanup)
+        target = Path(outside.name) / "secret.txt"
+        target.write_text("needle\n", encoding="utf-8", newline="\n")
+        try:
+            os.symlink(target, self.workspace / "link.txt")
+        except (OSError, NotImplementedError):
+            self.skipTest("symlinks are not available here")
+        result = self.box.run("grep", {"pattern": "needle"})
+        self.assertIn("inside.txt:1:needle", result.replace("\\", "/"))
+        self.assertNotIn("link.txt", result)
+
+    def test_edit_file_checks_the_path_before_the_strings(self):
+        self.assertEqual(
+            self.box.run("edit_file", {"path": "missing.txt", "old_string": "", "new_string": "x"}),
+            "error: not a file: missing.txt",
+        )
 
     def test_shell_runs_and_times_out(self):
         script = self.workspace / "say.py"
@@ -705,6 +852,28 @@ class AgentTests(unittest.TestCase):
         self.assertIn("1|hello", sink.results[0][1])
         self.assertTrue(any("context " in line for line in sink.statuses))
 
+    def test_closing_round_after_the_step_limit(self):
+        agent, session, sink, client, workspace = self._agent(
+            [
+                tool_call("read_file", "{\"path\": \"note.txt\"}"),
+                answer("Reviewed.", {"prompt_tokens": 30, "completion_tokens": 4}),
+            ],
+            max_steps=1,
+        )
+        (workspace / "note.txt").write_text("hello\n", encoding="utf-8", newline="\n")
+        self.assertEqual(agent.ask("review"), "Reviewed.")
+        self.assertIsNone(client.seen[1]["tools"])
+        self.assertEqual(session.messages[-1]["content"], "Reviewed.")
+        self.assertNotIn("tool_calls", session.messages[-1])
+        agent, session, sink, client, workspace = self._agent(
+            [tool_call("read_file", "{\"path\": \"note.txt\"}"), tool_call("read_file", "{\"path\": \"note.txt\"}")],
+            max_steps=1,
+        )
+        self.assertEqual(agent.ask("review"), "Stopped: tool-call limit reached before a final answer.")
+        self.assertIsNone(client.seen[1]["tools"])
+        stored = [json.loads(line) for line in (workspace / ".foo-ai" / "session.jsonl").read_text(encoding="utf-8").splitlines()]
+        self.assertEqual(stored[-1]["role"], "tool")
+
     def test_provider_error_does_not_save_a_partial_answer(self):
         class Partial(ChatError):
             pass
@@ -875,6 +1044,58 @@ class ClientTests(unittest.TestCase):
         with self.assertRaises(ChatError) as caught:
             Client(provider).complete([], None, None)
         self.assertIn(f"cannot reach http://127.0.0.1:{closed}/v1/chat/completions:", str(caught.exception))
+
+    def test_json_body_reaches_the_sink(self):
+        def reply(body, requests):
+            return (
+                200,
+                "application/json",
+                json.dumps(
+                    {
+                        "choices": [
+                            {
+                                "message": {
+                                    "content": "Done.",
+                                    "reasoning_content": "because",
+                                    "tool_calls": [
+                                        {"type": "function", "function": {"name": "shell", "arguments": "{}"}}
+                                    ],
+                                }
+                            }
+                        ],
+                        "usage": {"prompt_tokens": 4, "completion_tokens": 1},
+                    }
+                ),
+            )
+
+        server = HttpScript(reply)
+        port = server.start_and_port()
+        self.addCleanup(server.stop)
+        provider = Provider("home", f"http://127.0.0.1:{port}/v1", "m", 1_000_000, "", {})
+        sink = Sink()
+        completion = Client(provider).complete([{"role": "user", "content": "hi"}], None, sink)
+        self.assertEqual(completion.content, "Done.")
+        self.assertEqual(sink.contents, ["Done."])
+        self.assertEqual(sink.reasonings, ["because"])
+        self.assertEqual(sink.names, ["shell"])
+
+    def test_stream_read_error_becomes_a_chat_error(self):
+        def reply(body, requests):
+            return 200, "text/event-stream", sse(json.dumps({"choices": [{"delta": {"content": "Hi"}}]}))
+
+        server = HttpScript(reply)
+        port = server.start_and_port()
+        self.addCleanup(server.stop)
+        provider = Provider("home", f"http://127.0.0.1:{port}/v1", "m", 1_000_000, "", {})
+        with mock.patch("foo_ai.client._read_sse", side_effect=ConnectionResetError("reset")):
+            with self.assertRaises(ChatError) as caught:
+                Client(provider).complete([{"role": "user", "content": "hi"}], None, None)
+        self.assertIn("cannot reach ", str(caught.exception))
+        self.assertIn("reset", str(caught.exception))
+
+    def test_fallback_ids_count_kept_calls(self):
+        calls = _normalize_calls([None, {"function": {"name": "shell", "arguments": "{}"}}])
+        self.assertEqual([call["id"] for call in calls], ["call_0"])
 
 
 class McpTests(unittest.TestCase):
@@ -1073,6 +1294,251 @@ class CliIntegrationTests(unittest.TestCase):
             self.assertIn("← shell (", result.stdout)
             self.assertFalse((Path(directory) / "ran.txt").exists())
             self.assertIn("skipped\n", result.stdout)
+
+
+class SkillTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.workspace = Path(self.tmp.name).resolve()
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _write_skill(self, name: str, text: str) -> None:
+        directory = self.workspace / ".foo-ai" / "skills" / name
+        directory.mkdir(parents=True)
+        (directory / "SKILL.md").write_text(text, encoding="utf-8", newline="\n")
+
+    def _agent(self, rounds, catalog=None, max_steps=8):
+        catalog = load_skills(self.workspace) if catalog is None else catalog
+        session = Session(self.workspace, prompt=system_prompt(catalog))
+        sink = Sink()
+        client = ScriptedClient(rounds)
+        provider = Provider("home", "http://127.0.0.1:9/v1", "test", 1_000_000, "", {})
+        toolbox = Toolbox(self.workspace, confirm=lambda command: True, skills=catalog)
+        agent = Agent(
+            provider=provider,
+            session=session,
+            toolbox=toolbox,
+            client=client,
+            sink=sink,
+            max_steps=max_steps,
+        )
+        return agent, session, sink, client, catalog
+
+    def test_builtin_review_and_project_override(self):
+        catalog = load_skills(self.workspace)
+        self.assertEqual([skill.name for skill in catalog.entries], ["review"])
+        review = catalog.entries[0]
+        self.assertEqual(review.run, "subagent")
+        self.assertEqual(review.tools, ("read_file", "list_dir", "grep", "shell"))
+        self.assertEqual(review.shell, ("git status", "git diff", "git log", "git show"))
+        self.assertEqual(review.task, "Review the uncommitted changes.")
+        self.assertTrue(review.body.startswith("You are a read-only code reviewer."))
+        prompt = system_prompt(catalog)
+        self.assertFalse(prompt.endswith("\n"))
+        self.assertIn(
+            "\n\nSkills:\n- review (subagent): Review the working tree for correctness, security, and missing tests.",
+            prompt,
+        )
+        self.assertEqual(
+            [item["function"]["name"] for item in Toolbox(self.workspace, lambda command: True, skills=catalog).schemas()],
+            ["read_file", "list_dir", "grep", "write_file", "edit_file", "shell", "run_skill"],
+        )
+        self._write_skill(
+            "review",
+            "---\nname: review\ndescription: Project review.\nrun: inline\n---\n\nProject body.\n",
+        )
+        self._write_skill(
+            "check",
+            "---\nname: check\ndescription: Check a module.\nrun: inline\n---\n\nCheck it.\n",
+        )
+        self._write_skill("Nope", "---\nname: Nope\n---\n\nHi.\n")
+        self._write_skill("note", "hello\n")
+        replaced = load_skills(self.workspace)
+        self.assertEqual([skill.name for skill in replaced.entries], ["check", "review"])
+        self.assertEqual(replaced.get("review").description, "Project review.")
+        self.assertEqual(replaced.get("review").body, "Project body.")
+        self.assertEqual(replaced.get("check").run, "inline")
+        self.assertEqual(
+            replaced.skipped,
+            [
+                "Skill skipped: .foo-ai/skills/Nope/SKILL.md: invalid skill name\n",
+                "Skill skipped: .foo-ai/skills/note/SKILL.md: frontmatter is missing\n",
+            ],
+        )
+        self.assertEqual(skills_banner(replaced), "Skills: /check, /review.")
+
+    def test_skipped_reasons_and_shell_guard(self):
+        self._write_skill(
+            "badsh",
+            "---\nname: badsh\ndescription: Bad.\nrun: subagent\ntools: shell\nshell:\n  - git status | head\n---\n\nBody.\n",
+        )
+        catalog = load_skills(self.workspace)
+        self.assertIn(
+            "Skill skipped: .foo-ai/skills/badsh/SKILL.md: shell prefix contains a forbidden character\n",
+            catalog.skipped,
+        )
+        self.assertTrue(command_allowed("git diff --stat", ("git diff",)))
+        self.assertFalse(command_allowed("git difftool", ("git diff",)))
+        self.assertFalse(command_allowed("git status && echo hi", ("git status",)))
+        script = self.workspace / "say.py"
+        script.write_text("print(123)\n", encoding="utf-8", newline="\n")
+        command = f'"{sys.executable}" "{script}"'
+        prefix = f'"{sys.executable}"'
+
+        def confirm(value: str) -> bool:
+            raise AssertionError(value)
+
+        box = RestrictedToolbox(Toolbox(self.workspace, confirm), ("shell",), (prefix,))
+        self.assertIn("123", box.run("shell", {"command": command}))
+        self.assertEqual(box.run("shell", {"command": "echo hi"}), "error: command is not allowed for this skill")
+        self.assertEqual(box.run("edit_file", {}), "error: unknown tool 'edit_file'")
+
+    def test_subagent_stays_out_of_the_parent_session(self):
+        agent, session, sink, client, catalog = self._agent(
+            [
+                tool_call("run_skill", json.dumps({"name": "review", "arguments": "focus"})),
+                answer("verdict", {"prompt_tokens": 10, "completion_tokens": 2}),
+                answer("done"),
+            ]
+        )
+        agent.context.ratio = 0.5
+        self.assertEqual(agent.ask("please"), "done")
+        self.assertEqual(agent.context.ratio, 0.5)
+        child = client.seen[1]
+        self.assertTrue(child["messages"][0]["content"].startswith("You are a read-only code reviewer."))
+        self.assertEqual(child["messages"][1], {"role": "user", "content": "focus"})
+        self.assertEqual(len(child["messages"]), 2)
+        self.assertEqual(
+            [item["function"]["name"] for item in child["tools"]],
+            ["read_file", "list_dir", "grep", "shell"],
+        )
+        self.assertIn("\n[review] context ", "".join(sink.statuses))
+        stored = (self.workspace / ".foo-ai" / "session.jsonl").read_text(encoding="utf-8")
+        self.assertIn("verdict", stored)
+        self.assertNotIn("You are a read-only code reviewer.", stored)
+        self.assertEqual(
+            [json.loads(line)["role"] for line in stored.splitlines()],
+            ["system", "user", "assistant", "tool", "assistant"],
+        )
+        self.assertIn("Skills:\n- review (subagent):", session.messages[0]["content"])
+
+    def test_inline_unknown_and_required_arguments(self):
+        self._write_skill(
+            "check",
+            "---\nname: check\ndescription: Check a module.\nrun: inline\n---\n\nCheck it.\n",
+        )
+        agent, session, sink, client, catalog = self._agent(
+            [
+                tool_call("run_skill", json.dumps({"name": "check", "arguments": "the parser"})),
+                answer("done"),
+            ]
+        )
+        self.assertEqual(agent.ask("please"), "done")
+        self.assertEqual(len(client.seen), 2)
+        self.assertEqual(sink.results[0][1], "Check it.\n\nArguments:\nthe parser")
+        box = agent.toolbox
+        self.assertEqual(box.run("run_skill", json.dumps({"name": "missing"})), "error: unknown skill 'missing'")
+        self.assertEqual(box.run("run_skill", json.dumps({"name": "review"})), "error: arguments are required for subagent skill 'review'")
+        self.assertEqual(
+            box.run("run_skill", json.dumps({"name": "review", "arguments": 1})),
+            "error: arguments must be a string",
+        )
+
+    def test_child_error_verbose_trace_and_step_cap(self):
+        agent, session, sink, client, catalog = self._agent(
+            [
+                tool_call("run_skill", json.dumps({"name": "review", "arguments": "focus"})),
+                ChatError("HTTP 500 from http://x: boom"),
+                answer("continued"),
+            ]
+        )
+        self.assertEqual(agent.ask("please"), "continued")
+        self.assertEqual(sink.results[0][1], "error: HTTP 500 from http://x: boom")
+        (self.workspace / "note.txt").write_text("hello\n", encoding="utf-8", newline="\n")
+        agent, session, sink, client, catalog = self._agent(
+            [
+                tool_call("run_skill", json.dumps({"name": "review", "arguments": "focus"})),
+                tool_call("read_file", json.dumps({"path": "note.txt"})),
+                answer("verdict"),
+                answer("done"),
+            ]
+        )
+        sink.verbose = True
+        self.assertEqual(agent.ask("please"), "done")
+        printed = "".join(sink.contents)
+        self.assertIn("\n[review] → read_file", printed)
+        self.assertIn("\n[review] 1|hello\n[1 lines shown, 1 total]\n", printed)
+        agent, session, sink, client, catalog = self._agent(
+            [
+                tool_call("run_skill", json.dumps({"name": "review", "arguments": "focus"})),
+                tool_call("read_file", json.dumps({"path": "note.txt"})),
+                answer("verdict"),
+                answer("done"),
+            ],
+            max_steps=1,
+        )
+        self.assertEqual(agent.ask("please"), "done")
+        self.assertEqual(sink.results[0][1], "verdict")
+        self.assertIsNone(client.seen[2]["tools"])
+
+    def test_slash_review_and_resume_prompt(self):
+        agent, session, sink, client, catalog = self._agent([answer("Looks good.")])
+        self.assertEqual(agent.run_slash("/review", "review", ""), "Looks good.")
+        self.assertEqual(sink.contents, ["Looks good."])
+        self.assertEqual(session.messages[1]["content"], "/review")
+        self.assertEqual(session.messages[2]["content"], "Looks good.")
+        self.assertEqual(session.messages[2]["reasoning_content"], "")
+        self.assertNotIn("tool_calls", session.messages[2])
+        self.assertEqual(client.seen[0]["messages"][1]["content"], "Review the uncommitted changes.")
+        self._write_skill(
+            "scan",
+            "---\nname: scan\ndescription: Scan.\nrun: subagent\n---\n\nLook.\n",
+        )
+        agent, session, sink, client, catalog = self._agent([])
+        self.assertIsNone(agent.run_slash("/scan", "scan", ""))
+        self.assertEqual(sink.statuses, ["error: arguments are required for subagent skill 'scan'\n"])
+        self.assertEqual(len(session.messages), 1)
+        session.add_user("hi")
+        session.save()
+        fresh = Session(self.workspace, prompt="custom prompt")
+        self.assertEqual(fresh.load(), "Resumed .foo-ai/session.jsonl (1 messages).")
+        self.assertEqual(fresh.messages[0]["content"], "custom prompt")
+        fresh.reset()
+        self.assertEqual(fresh.messages[0]["content"], "custom prompt")
+
+    def test_cli_slash_is_interactive_only(self):
+        captured = {}
+
+        def reply(body, requests):
+            captured.setdefault("bodies", []).append(body)
+            payload = sse(json.dumps({"choices": [{"delta": {"content": "Looks good."}}]}))
+            return 200, "text/event-stream", payload
+
+        server = HttpScript(reply)
+        port = server.start_and_port()
+        self.addCleanup(server.stop)
+        env = {"FOO_AI_BASE_URL": f"http://127.0.0.1:{port}/v1", "FOO_AI_MODEL": "test-model"}
+        interactive = run_cli([], self.workspace, stdin="/review\n/exit\n", env=env)
+        self.assertEqual(interactive.returncode, 0, interactive.stderr)
+        self.assertIn("Looks good.", interactive.stdout)
+        self.assertIn("Skills: /review.\n", interactive.stdout)
+        child = captured["bodies"][0]
+        self.assertTrue(child["messages"][0]["content"].startswith("You are a read-only code reviewer."))
+        self.assertEqual(child["messages"][1]["content"], "Review the uncommitted changes.")
+        self.assertEqual(
+            [item["function"]["name"] for item in child["tools"]],
+            ["read_file", "list_dir", "grep", "shell"],
+        )
+        stored = (self.workspace / ".foo-ai" / "session.jsonl").read_text(encoding="utf-8")
+        self.assertIn('"content": "/review"', stored)
+        self.assertNotIn("You are a read-only code reviewer.", stored)
+        one_shot = run_cli(["/review"], self.workspace, env=env)
+        self.assertEqual(one_shot.returncode, 0, one_shot.stderr)
+        parent = captured["bodies"][1]
+        self.assertTrue(parent["messages"][0]["content"].startswith("You are Foo AI"))
+        self.assertEqual(parent["messages"][-1]["content"], "/review")
 
 
 if __name__ == "__main__":
