@@ -1,4 +1,4 @@
-"""The six built-in tools."""
+"""The seven built-in tools."""
 
 from __future__ import annotations
 
@@ -10,11 +10,12 @@ import re
 import subprocess
 from pathlib import Path
 
-TOOL_NAMES = ("read_file", "list_dir", "grep", "write_file", "edit_file", "shell")
+TOOL_NAMES = ("read_file", "list_dir", "glob", "grep", "write_file", "edit_file", "shell")
 
 SHELL_TIMEOUT_SECONDS = 120
 RESULT_LIMIT = 20_000
-_GREP_SKIP = {".git", ".venv", "venv", "__pycache__", "node_modules", ".foo-ai"}
+GLOB_MATCH_LIMIT = 200
+_SKIP_DIRS = {".git", ".venv", "venv", "__pycache__", "node_modules", ".foo-ai"}
 
 TOOL_SCHEMAS = [
     {
@@ -57,6 +58,32 @@ TOOL_SCHEMAS = [
                         "description": "Directory relative to the workspace. Default '.'.",
                     }
                 },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "glob",
+            "description": (
+                "Find files matching a glob pattern. * and ? match inside one path segment, "
+                "and ** crosses directories. A pattern with no / matches the start directory, "
+                "then the whole tree only when that directory has no match. "
+                "Use **/*.py to search every level. Results are workspace-relative paths using /."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "pattern": {
+                        "type": "string",
+                        "description": "Glob pattern, with / as the separator.",
+                    },
+                    "path": {
+                        "type": "string",
+                        "description": "Directory to search. Default workspace root.",
+                    },
+                },
+                "required": ["pattern"],
             },
         },
     },
@@ -126,7 +153,7 @@ TOOL_SCHEMAS = [
             "description": (
                 "Run a command in the workspace and return combined stdout and stderr. "
                 "The user must approve the command before it runs. "
-                "Prefer read_file, list_dir, grep, and edit_file for file work."
+                "Prefer read_file, list_dir, glob, grep, and edit_file for file work."
             ),
             "parameters": {
                 "type": "object",
@@ -218,6 +245,8 @@ class Toolbox:
                 result = self._read_file(raw)
             elif name == "list_dir":
                 result = self._list_dir(raw)
+            elif name == "glob":
+                result = self._glob(raw)
             elif name == "grep":
                 result = self._grep(raw)
             elif name == "write_file":
@@ -289,6 +318,27 @@ class Toolbox:
         if not lines:
             return "[empty directory]"
         return "\n".join(lines)
+
+    def _glob(self, raw: object) -> str:
+        args = parse_arguments(raw)
+        if isinstance(args, str):
+            return args
+        pattern = args.get("pattern")
+        if not isinstance(pattern, str) or pattern.strip() == "":
+            return "error: pattern is required"
+        normalized, error = _normalize_glob(pattern)
+        if error is not None:
+            return error
+        resolved = self._resolve(args.get("path", ""))
+        if isinstance(resolved, str):
+            return resolved
+        if not resolved.is_dir():
+            return f"error: not a directory: {_final_name(args.get('path', ''), resolved)}"
+        entries = _glob_entries(resolved, self.workspace)
+        matched = [display for relative, display in entries if _match_glob(relative, normalized)]
+        if not matched and "/" not in normalized:
+            matched = [display for relative, display in entries if _match_glob(relative, "**/" + normalized)]
+        return _format_glob(matched)
 
     def _grep(self, raw: object) -> str:
         args = parse_arguments(raw)
@@ -512,9 +562,161 @@ def _final_name(raw: object, candidate: Path) -> str:
 def _walk_files(root: Path) -> list[Path]:
     files: list[Path] = []
     for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = [name for name in dirnames if name not in _GREP_SKIP]
+        dirnames[:] = [name for name in dirnames if name not in _SKIP_DIRS]
         for name in filenames:
             files.append(Path(dirpath) / name)
             if len(files) >= 2000:
                 return files
     return files
+
+
+def _normalize_glob(pattern: str) -> tuple[str | None, str | None]:
+    text = pattern.strip().replace("\\", "/")
+    if text == "":
+        return None, "error: pattern is required"
+    first = text.split("/", 1)[0]
+    if text.startswith("/") or (len(first) >= 2 and first[0].isalpha() and first[1] == ":"):
+        return None, "error: pattern must be relative"
+    parts = [part for part in text.split("/") if part]
+    if any(part == ".." for part in parts):
+        return None, "error: pattern must not contain '..'"
+    if not parts:
+        return None, "error: pattern is required"
+    return "/".join(parts), None
+
+
+def _glob_entries(root: Path, workspace: Path) -> list[tuple[str, str]]:
+    entries: list[tuple[str, str]] = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [name for name in dirnames if name not in _SKIP_DIRS]
+        for name in filenames:
+            file_path = Path(dirpath) / name
+            try:
+                file_path.resolve().relative_to(workspace)
+                relative = file_path.relative_to(root).as_posix()
+                display = file_path.relative_to(workspace).as_posix()
+            except (OSError, ValueError):
+                continue
+            entries.append((relative, display))
+    return entries
+
+
+def _format_glob(paths: list[str]) -> str:
+    if not paths:
+        return "[no matches]"
+    ordered = sorted(set(paths))
+    limited = len(ordered) > GLOB_MATCH_LIMIT
+    if limited:
+        ordered = ordered[:GLOB_MATCH_LIMIT]
+    text = "\n".join(ordered)
+    if limited:
+        text += "\n…[match limit reached]"
+    return text
+
+
+def _match_glob(relative: str, pattern: str) -> bool:
+    parts = relative.split("/") if relative else []
+    pats = pattern.split("/")
+    return _match_parts(parts, pats, 0, 0, {})
+
+
+def _match_parts(
+    parts: list[str],
+    pats: list[str],
+    index: int,
+    pattern_index: int,
+    memo: dict[tuple[int, int], bool],
+) -> bool:
+    key = (index, pattern_index)
+    cached = memo.get(key)
+    if cached is not None:
+        return cached
+    while pattern_index < len(pats) and pats[pattern_index] == "**":
+        pattern_index += 1
+        for next_index in range(index, len(parts) + 1):
+            if _match_parts(parts, pats, next_index, pattern_index, memo):
+                memo[key] = True
+                return True
+        memo[key] = False
+        return False
+    if pattern_index == len(pats):
+        memo[key] = index == len(parts)
+        return memo[key]
+    if index == len(parts) or not _segment_match(parts[index], pats[pattern_index]):
+        memo[key] = False
+        return False
+    memo[key] = _match_parts(parts, pats, index + 1, pattern_index + 1, memo)
+    return memo[key]
+
+
+def _segment_match(text: str, pattern: str) -> bool:
+    return _segment_at(text, 0, pattern, 0)
+
+
+def _segment_at(text: str, text_index: int, pattern: str, pattern_index: int) -> bool:
+    while pattern_index < len(pattern):
+        token = pattern[pattern_index]
+        if token == "*":
+            pattern_index += 1
+            while pattern_index < len(pattern) and pattern[pattern_index] == "*":
+                pattern_index += 1
+            if pattern_index == len(pattern):
+                return True
+            for next_index in range(text_index, len(text) + 1):
+                if _segment_at(text, next_index, pattern, pattern_index):
+                    return True
+            return False
+        if text_index >= len(text):
+            return False
+        if token == "?":
+            text_index += 1
+            pattern_index += 1
+            continue
+        if token == "[":
+            matched, pattern_index = _class_match(text[text_index], pattern, pattern_index)
+            if not matched:
+                return False
+            text_index += 1
+            continue
+        if token != text[text_index]:
+            return False
+        text_index += 1
+        pattern_index += 1
+    return text_index == len(text)
+
+
+def _class_match(char: str, pattern: str, start: int) -> tuple[bool, int]:
+    index = start + 1
+    if index >= len(pattern):
+        return char == "[", start + 1
+    negate = pattern[index] in "^!"
+    if negate:
+        index += 1
+    if index >= len(pattern):
+        return char == "[", start + 1
+    members: set[str] = set()
+    if pattern[index] == "]":
+        members.add("]")
+        index += 1
+    while index < len(pattern) and pattern[index] != "]":
+        range_end = index + 2
+        if (
+            pattern[index] != "-"
+            and range_end < len(pattern)
+            and pattern[index + 1] == "-"
+            and pattern[range_end] != "]"
+        ):
+            first = ord(pattern[index])
+            last = ord(pattern[range_end])
+            if first <= last:
+                members.update(chr(code) for code in range(first, last + 1))
+            index += 3
+            continue
+        members.add(pattern[index])
+        index += 1
+    if index >= len(pattern):
+        return char == "[", start + 1
+    matched = char in members
+    if negate:
+        matched = not matched
+    return matched, index + 1

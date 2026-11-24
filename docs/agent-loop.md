@@ -89,7 +89,7 @@ Startup order, after MCP connect:
 2. The session note, only when load or a broken file produced one.
 3. `Foo AI · {provider name} · {model}` on standard output.
 4. One MCP line per enabled server, on standard output. Disabled servers print nothing. See [MCP](mcp.md).
-5. Interactive only: `Workspace {resolved path}` and then `/exit to quit, /reset to clear the conversation.` The path uses the platform's usual string form. When at least one skill is loaded, print `Skills: /review.` on the next line, with every loaded slash name in catalog order. A one-shot run does not print these lines.
+5. Interactive only: `Workspace {resolved path}` and then `/exit to quit, /reset to clear the conversation.` The path uses the platform's usual string form. When at least one skill is loaded, print `Skills: /explore, /review.` on the next line, with every loaded slash name in catalog order. A one-shot run does not print these lines.
 
 The interactive prompt is a newline, then `> `.
 

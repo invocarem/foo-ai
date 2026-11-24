@@ -221,7 +221,7 @@ class PackageTests(unittest.TestCase):
         self.assertIn("Foo AI · home · DeepSeek-V4.1-Flash-1017\n", result.stdout)
         self.assertIn("Workspace ", result.stdout)
         self.assertIn("/exit to quit, /reset to clear the conversation.\n", result.stdout)
-        self.assertIn("Skills: /review.\n", result.stdout)
+        self.assertIn("Skills: /explore, /review.\n", result.stdout)
         self.assertIn("\n> ", result.stdout)
         self.assertIn("Conversation cleared.\n", result.stdout)
 
@@ -532,7 +532,10 @@ class ToolTests(unittest.TestCase):
 
     def test_schemas_match_the_spec(self):
         names = [item["function"]["name"] for item in TOOL_SCHEMAS]
-        self.assertEqual(list(names), ["read_file", "list_dir", "grep", "write_file", "edit_file", "shell"])
+        self.assertEqual(
+            list(names),
+            ["read_file", "list_dir", "glob", "grep", "write_file", "edit_file", "shell"],
+        )
         self.assertNotIn("required", TOOL_SCHEMAS[1]["function"]["parameters"])
         self.assertEqual(TOOL_SCHEMAS[0]["function"]["parameters"]["required"], ["path"])
 
@@ -623,6 +626,80 @@ class ToolTests(unittest.TestCase):
         self.assertEqual(self.box.run("read_file", {"path": "empty.txt"}), "[empty file, 0 total]")
         self.assertEqual(self.box.run("read_file", {"path": "missing.txt"}), "error: not a file: missing.txt")
         self.assertEqual(self.box.run("grep", {"pattern": "z", "path": "missing.txt"}), "error: missing.txt")
+
+    def test_glob_matches_files(self):
+        (self.workspace / "src").mkdir()
+        (self.workspace / "src" / "b.py").write_text("b\n", encoding="utf-8", newline="\n")
+        (self.workspace / "src" / "a.py").write_text("a\n", encoding="utf-8", newline="\n")
+        (self.workspace / "src" / "a.txt").write_text("t\n", encoding="utf-8", newline="\n")
+        (self.workspace / "src" / "sub").mkdir()
+        (self.workspace / "src" / "sub" / "c.py").write_text("c\n", encoding="utf-8", newline="\n")
+        (self.workspace / "A.txt").write_text("A\n", encoding="utf-8", newline="\n")
+        (self.workspace / "b.txt").write_text("b\n", encoding="utf-8", newline="\n")
+        (self.workspace / ".gitignore").write_text("*\n", encoding="utf-8", newline="\n")
+        (self.workspace / ".git").mkdir()
+        (self.workspace / ".git" / "hidden.txt").write_text("secret\n", encoding="utf-8", newline="\n")
+        (self.workspace / ".foo-ai").mkdir()
+        (self.workspace / ".foo-ai" / "session.jsonl").write_text("secret\n", encoding="utf-8", newline="\n")
+        (self.workspace / "pkg").mkdir()
+        (self.workspace / "file1.txt").write_text("1\n", encoding="utf-8", newline="\n")
+        (self.workspace / "file10.txt").write_text("10\n", encoding="utf-8", newline="\n")
+        (self.workspace / "a.c").write_text("c\n", encoding="utf-8", newline="\n")
+        (self.workspace / "a.h").write_text("h\n", encoding="utf-8", newline="\n")
+        (self.workspace / "a.py").write_text("py\n", encoding="utf-8", newline="\n")
+
+        self.assertEqual(self.box.run("glob", {"pattern": ""}), "error: pattern is required")
+        self.assertEqual(self.box.run("glob", {"pattern": "/etc/passwd"}), "error: pattern must be relative")
+        self.assertEqual(self.box.run("glob", {"pattern": "C:/Windows"}), "error: pattern must be relative")
+        self.assertEqual(self.box.run("glob", {"pattern": "../secret"}), "error: pattern must not contain '..'")
+        self.assertEqual(self.box.run("glob", {"pattern": "*.py", "path": "a.py"}), "error: not a directory: a.py")
+        self.assertEqual(self.box.run("glob", {"pattern": "*.py", "path": "missing"}), "error: not a directory: missing")
+        self.assertTrue(self.box.run("glob", {"pattern": "*.py", "path": "../"}).startswith("error: path escapes the workspace:"))
+
+        top_py = self.box.run("glob", {"pattern": "*.py"})
+        self.assertEqual(top_py, "a.py")
+        self.assertEqual(self.box.run("glob", {"pattern": "**/*.py"}), "a.py\nsrc/a.py\nsrc/b.py\nsrc/sub/c.py")
+        self.assertEqual(self.box.run("glob", {"pattern": "src/*"}), "src/a.py\nsrc/a.txt\nsrc/b.py")
+        self.assertEqual(self.box.run("glob", {"pattern": "src\\*.py"}), "src/a.py\nsrc/b.py")
+        self.assertEqual(self.box.run("glob", {"pattern": "src//a.py"}), "src/a.py")
+        self.assertEqual(self.box.run("glob", {"pattern": "*.txt", "path": "src"}), "src/a.txt")
+        self.assertEqual(self.box.run("glob", {"pattern": "pkg"}), "[no matches]")
+        self.assertEqual(self.box.run("glob", {"pattern": "*.[ch]"}), "a.c\na.h")
+        self.assertEqual(self.box.run("glob", {"pattern": "file?.txt"}), "file1.txt")
+        self.assertEqual(self.box.run("glob", {"pattern": "[!a].py"}), "src/b.py\nsrc/sub/c.py")
+        self.assertEqual(self.box.run("glob", {"pattern": "[!a].c"}), "[no matches]")
+        self.assertNotIn("src/a.txt", self.box.run("glob", {"pattern": "*.txt"}))
+        listed = self.box.run("glob", {"pattern": "*.txt"})
+        self.assertEqual(listed.splitlines()[:2], ["A.txt", "b.txt"])
+        self.assertNotIn(".git/hidden.txt", self.box.run("glob", {"pattern": "**/*"}))
+        self.assertNotIn(".foo-ai/session.jsonl", self.box.run("glob", {"pattern": "**/*"}))
+        self.assertIn(".gitignore", self.box.run("glob", {"pattern": "*"}).splitlines())
+
+        (self.workspace / "a.py").unlink()
+        self.assertEqual(
+            self.box.run("glob", {"pattern": "*.py"}),
+            "src/a.py\nsrc/b.py\nsrc/sub/c.py",
+        )
+
+    def test_glob_match_limit_and_outside_symlink(self):
+        for index in range(201):
+            (self.workspace / f"f{index:03}.txt").write_text("x\n", encoding="utf-8", newline="\n")
+        limited = self.box.run("glob", {"pattern": "*.txt"})
+        self.assertTrue(limited.endswith("\n…[match limit reached]"))
+        self.assertEqual(len(limited.splitlines()) - 1, 200)
+        self.assertIn("f000.txt", limited)
+        self.assertNotIn("f200.txt", limited)
+
+        outside = tempfile.TemporaryDirectory()
+        self.addCleanup(outside.cleanup)
+        target = Path(outside.name) / "secret.txt"
+        target.write_text("secret\n", encoding="utf-8", newline="\n")
+        try:
+            os.symlink(target, self.workspace / "link.txt")
+        except (OSError, NotImplementedError):
+            self.skipTest("symlinks are not available here")
+        result = self.box.run("glob", {"pattern": "link.txt"})
+        self.assertEqual(result, "[no matches]")
 
     def test_grep_match_limit_and_skips(self):
         text = "\n".join(["hit"] * 60) + "\n"
@@ -929,7 +1006,7 @@ class ClientTests(unittest.TestCase):
                     body["chat_template_kwargs"],
                     {"reasoning_effort": "max", "thinking": True},
                 )
-                self.assertEqual(len(body["tools"]), 6)
+                self.assertEqual(len(body["tools"]), 7)
                 payload = sse(
                     json.dumps({"choices": [{"delta": {"reasoning_content": "think "}}]}),
                     json.dumps({"choices": [{"delta": {"content": "Hi"}}]}),
@@ -1328,8 +1405,14 @@ class SkillTests(unittest.TestCase):
 
     def test_builtin_review_and_project_override(self):
         catalog = load_skills(self.workspace)
-        self.assertEqual([skill.name for skill in catalog.entries], ["review"])
-        review = catalog.entries[0]
+        self.assertEqual([skill.name for skill in catalog.entries], ["explore", "review"])
+        explore = catalog.get("explore")
+        self.assertEqual(explore.run, "subagent")
+        self.assertEqual(explore.tools, ("read_file", "list_dir", "glob", "grep"))
+        self.assertEqual(explore.shell, ())
+        self.assertEqual(explore.task, "")
+        self.assertTrue(explore.body.startswith("You are a read-only exploration subagent."))
+        review = catalog.get("review")
         self.assertEqual(review.run, "subagent")
         self.assertEqual(review.tools, ("read_file", "list_dir", "grep", "shell"))
         self.assertEqual(review.shell, ("git status", "git diff", "git log", "git show"))
@@ -1338,12 +1421,12 @@ class SkillTests(unittest.TestCase):
         prompt = system_prompt(catalog)
         self.assertFalse(prompt.endswith("\n"))
         self.assertIn(
-            "\n\nSkills:\n- review (subagent): Review the working tree for correctness, security, and missing tests.",
+            "\n\nSkills:\n- explore (subagent): Investigate repository structure or behavior in a read-only subagent.\n- review (subagent): Review the working tree for correctness, security, and missing tests.",
             prompt,
         )
         self.assertEqual(
             [item["function"]["name"] for item in Toolbox(self.workspace, lambda command: True, skills=catalog).schemas()],
-            ["read_file", "list_dir", "grep", "write_file", "edit_file", "shell", "run_skill"],
+            ["read_file", "list_dir", "glob", "grep", "write_file", "edit_file", "shell", "run_skill"],
         )
         self._write_skill(
             "review",
@@ -1356,7 +1439,7 @@ class SkillTests(unittest.TestCase):
         self._write_skill("Nope", "---\nname: Nope\n---\n\nHi.\n")
         self._write_skill("note", "hello\n")
         replaced = load_skills(self.workspace)
-        self.assertEqual([skill.name for skill in replaced.entries], ["check", "review"])
+        self.assertEqual([skill.name for skill in replaced.entries], ["check", "explore", "review"])
         self.assertEqual(replaced.get("review").description, "Project review.")
         self.assertEqual(replaced.get("review").body, "Project body.")
         self.assertEqual(replaced.get("check").run, "inline")
@@ -1367,7 +1450,7 @@ class SkillTests(unittest.TestCase):
                 "Skill skipped: .foo-ai/skills/note/SKILL.md: frontmatter is missing\n",
             ],
         )
-        self.assertEqual(skills_banner(replaced), "Skills: /check, /review.")
+        self.assertEqual(skills_banner(replaced), "Skills: /check, /explore, /review.")
 
     def test_skipped_reasons_and_shell_guard(self):
         self._write_skill(
@@ -1422,7 +1505,10 @@ class SkillTests(unittest.TestCase):
             [json.loads(line)["role"] for line in stored.splitlines()],
             ["system", "user", "assistant", "tool", "assistant"],
         )
-        self.assertIn("Skills:\n- review (subagent):", session.messages[0]["content"])
+        self.assertIn(
+            "Skills:\n- explore (subagent): Investigate repository structure or behavior in a read-only subagent.\n- review (subagent):",
+            session.messages[0]["content"],
+        )
 
     def test_inline_unknown_and_required_arguments(self):
         self._write_skill(
@@ -1484,6 +1570,10 @@ class SkillTests(unittest.TestCase):
         self.assertIsNone(client.seen[2]["tools"])
 
     def test_slash_review_and_resume_prompt(self):
+        bare, session, sink, client, catalog = self._agent([])
+        self.assertIsNone(bare.run_slash("/explore", "explore", ""))
+        self.assertEqual(sink.statuses, ["error: arguments are required for subagent skill 'explore'\n"])
+        self.assertEqual(len(session.messages), 1)
         agent, session, sink, client, catalog = self._agent([answer("Looks good.")])
         self.assertEqual(agent.run_slash("/review", "review", ""), "Looks good.")
         self.assertEqual(sink.contents, ["Looks good."])
@@ -1496,6 +1586,13 @@ class SkillTests(unittest.TestCase):
             "scan",
             "---\nname: scan\ndescription: Scan.\nrun: subagent\n---\n\nLook.\n",
         )
+        self._write_skill(
+            "find",
+            "---\nname: find\ndescription: Find.\nrun: subagent\ntools: grep, glob\n---\n\nFind.\n",
+        )
+        loaded = load_skills(self.workspace)
+        self.assertEqual(loaded.get("scan").tools, ("read_file", "list_dir", "glob", "grep"))
+        self.assertEqual(loaded.get("find").tools, ("glob", "grep"))
         agent, session, sink, client, catalog = self._agent([])
         self.assertIsNone(agent.run_slash("/scan", "scan", ""))
         self.assertEqual(sink.statuses, ["error: arguments are required for subagent skill 'scan'\n"])
@@ -1523,7 +1620,7 @@ class SkillTests(unittest.TestCase):
         interactive = run_cli([], self.workspace, stdin="/review\n/exit\n", env=env)
         self.assertEqual(interactive.returncode, 0, interactive.stderr)
         self.assertIn("Looks good.", interactive.stdout)
-        self.assertIn("Skills: /review.\n", interactive.stdout)
+        self.assertIn("Skills: /explore, /review.\n", interactive.stdout)
         child = captured["bodies"][0]
         self.assertTrue(child["messages"][0]["content"].startswith("You are a read-only code reviewer."))
         self.assertEqual(child["messages"][1]["content"], "Review the uncommitted changes.")

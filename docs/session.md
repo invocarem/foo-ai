@@ -1,6 +1,6 @@
 # Session
 
-The conversation is stored at `.foo-ai/session.jsonl` inside the workspace. `grep` does not descend into `.foo-ai`. `list_dir` still shows that directory when it is asked to list the parent.
+The conversation is stored at `.foo-ai/session.jsonl` inside the workspace. `grep` and `glob` do not descend into `.foo-ai`. `list_dir` still shows that directory when it is asked to list the parent.
 
 Each non-blank line is one JSON object. Write the file as UTF-8 with `\n` line endings, `json.dumps` of each message with non-ASCII kept as characters, and a newline after the last line. Write `.foo-ai/session.jsonl.tmp` first, then replace `session.jsonl` with it. A crash during the temp write leaves the previous transcript in place. The reader opens only `session.jsonl` and ignores a leftover temp file. Create `.foo-ai` on the first save.
 

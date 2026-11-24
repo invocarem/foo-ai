@@ -12,8 +12,8 @@ from foo_ai.session import Session
 _NAME = re.compile(r"^[a-z][a-z0-9]*(-[a-z0-9]+)*$")
 _KEY = re.compile(r"^[a-z][a-z0-9-]*$")
 _RESERVED = {"exit", "quit", "reset"}
-_TOOL_ORDER = ("read_file", "list_dir", "grep", "write_file", "edit_file", "shell")
-_DEFAULT_TOOLS = ("read_file", "list_dir", "grep")
+_TOOL_ORDER = ("read_file", "list_dir", "glob", "grep", "write_file", "edit_file", "shell")
+_DEFAULT_TOOLS = ("read_file", "list_dir", "glob", "grep")
 _FORBIDDEN = set("|;&<>`$()\r\n")
 _SCALAR_KEYS = ("name", "description", "run", "task")
 

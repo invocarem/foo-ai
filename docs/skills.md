@@ -23,11 +23,11 @@ Blank lines in the frontmatter are ignored. A key line is `key: value`, split on
 | `name` | one line | Required. Equal to the directory name. |
 | `description` | one line | Required. The catalog text. Non-empty after strip. |
 | `run` | one line | Required. `inline` or `subagent`. |
-| `tools` | comma-separated line | Tool names the subagent may call. Omitted on a subagent means `read_file`, `list_dir`, `grep`. |
+| `tools` | comma-separated line | Tool names the subagent may call. Omitted on a subagent means `read_file`, `list_dir`, `glob`, `grep`. |
 | `shell` | list | Command prefixes. Used only when `tools` includes `shell`. |
 | `task` | one line | Default arguments for a slash invocation with an empty remainder. Omitted means there is no default. |
 
-`tools` names one or more of `read_file`, `list_dir`, `grep`, `write_file`, `edit_file`, and `shell`, separated by commas. Empty tokens are dropped. An unknown token invalidates the file. Duplicate tokens are ignored. The child sees the kept names in the six-tool order, not the order written in the file.
+`tools` names one or more of `read_file`, `list_dir`, `glob`, `grep`, `write_file`, `edit_file`, and `shell`, separated by commas. Empty tokens are dropped. An unknown token invalidates the file. Duplicate tokens are ignored. The child sees the kept names in the seven-tool order, not the order written in the file.
 
 `shell` is a list of prefixes. Each prefix is 1 to 200 characters. A prefix that is empty or that contains ``| & ; < > ` $ ( )`` or a newline invalidates the file. When `shell` is one of the tools, the list is required and non-empty. When `shell` is not one of the tools, a shell list is ignored. An inline skill stores these fields and does not use them; an invalid field still rejects the file.
 
@@ -54,7 +54,7 @@ The path uses forward slashes. A built-in path looks like `foo_ai/skills/review/
 | `description` is missing or blank | `description is required` |
 | `run` is not `inline` or `subagent` | `run must be inline or subagent` |
 | `tools` is a list, or is present and empty | `tools must be a comma-separated line` |
-| A tools token is not one of the six | `unknown tool 'bash'` |
+| A tools token is not one of the seven | `unknown tool 'bash'` |
 | `shell` has a scalar value | `shell must be a list` |
 | A shell prefix is empty | `shell prefix is empty` |
 | A shell prefix is longer than 200 characters | `shell prefix is too long` |
@@ -70,6 +70,7 @@ When at least one skill loaded, the system prompt is the prompt in [Agent loop](
 
 ```text
 Skills:
+- explore (subagent): Investigate repository structure or behavior in a read-only subagent.
 - review (subagent): Review the working tree for correctness, security, and missing tests.
 ```
 
@@ -80,14 +81,14 @@ On resume, the stored system message is replaced with that current prompt, catal
 The interactive banner, after the `/exit` line, prints one more line when at least one skill loaded:
 
 ```text
-Skills: /review.
+Skills: /explore, /review.
 ```
 
 Several names are comma-separated in catalog order: `Skills: /profile, /review.` A one-shot run does not print this line.
 
 ## run_skill
 
-`run_skill` is sent after the six built-in schemas and before the MCP schemas. Its schema is stable for every skill:
+`run_skill` is sent after the seven built-in schemas and before the MCP schemas. Its schema is stable for every skill:
 
 ```json
 {
@@ -154,7 +155,7 @@ The child's answer text and reasoning are not printed on their own. With `--verb
 
 The name line is a newline, `[{skill}] → {tool}`, and no trailing newline. The result line is a newline, `[{skill}] `, the result, and a newline. Without `--verbose`, child tools print nothing. `--show-thinking` does not print child reasoning.
 
-The child tool list is its allowed names, in six-tool order. It does not include `run_skill` or MCP tools. The child uses the same step budget as the parent. Its rounds do not reduce the parent's remaining rounds. The closing round in [Agent loop](agent-loop.md) applies after that budget. Reaching the budget with no answer returns the same stop sentence the parent uses, as the tool result, without printing that sentence as parent answer text.
+The child tool list is its allowed names, in seven-tool order. It does not include `run_skill` or MCP tools. The child uses the same step budget as the parent. Its rounds do not reduce the parent's remaining rounds. The closing round in [Agent loop](agent-loop.md) applies after that budget. Reaching the budget with no answer returns the same stop sentence the parent uses, as the tool result, without printing that sentence as parent answer text.
 
 `shell` inside a child does not ask for confirmation and does not print the `$` line. The command is stripped. It runs only when it contains none of the forbidden characters and it equals a prefix or continues with a space after a prefix. `git diff` allows `git diff --stat` and rejects `git difftool`. Any other command returns `error: command is not allowed for this skill` and does not run. An allowed command then follows the parent shell's timeout, output, and exit line.
 
@@ -162,7 +163,7 @@ The child tool list is its allowed names, in six-tool order. It does not include
 
 In the interactive loop, after `/exit`, `/quit`, and `/reset`, a line whose first token is `/` plus a loaded skill name runs that skill. The remainder of the line, stripped, is the arguments. `/review now` passes `now`. A one-shot prompt is not a slash command; `foo-ai /review` is an ordinary user message.
 
-A subagent slash with an empty remainder uses `task` when the skill has one. `/review` on the shipped skill passes `Review the uncommitted changes.` When the remainder and `task` are both empty, print this line on standard error and do not change the session:
+A subagent slash with an empty remainder uses `task` when the skill has one. `/review` passes `Review the uncommitted changes.` `/explore` has no task, so an empty remainder prints the error below with `explore` in place of `review`. When the remainder and `task` are both empty, print this line on standard error and do not change the session:
 
 ```text
 error: arguments are required for subagent skill 'review'
@@ -172,7 +173,11 @@ Otherwise repair the session, save when the repair changed it, save the slash li
 
 An inline slash does not store the slash line. It sends the rendered playbook through the normal `ask` path, so the stored user message is that playbook.
 
-## Shipped skill
+## Shipped skills
+
+`foo_ai/skills/explore/SKILL.md` is the built-in explore. It is a read-only subagent. Its tools are `read_file`, `list_dir`, `glob`, and `grep`. It has no shell list and no task. Its description is `Investigate repository structure or behavior in a read-only subagent.`
+
+The body tells the explorer to answer from the code with `file:line` evidence. It uses `glob` to find files, `grep` to find text, and `list_dir` to see one directory, then reads the files that support the answer. It does not edit files. When a search finds nothing, it names the searches it ran.
 
 `foo_ai/skills/review/SKILL.md` is the built-in review. It is a read-only subagent. Its tools are `read_file`, `list_dir`, `grep`, and `shell`. Its prefixes are `git status`, `git diff`, `git log`, and `git show`. Its task is `Review the uncommitted changes.` Its description is `Review the working tree for correctness, security, and missing tests.`
 

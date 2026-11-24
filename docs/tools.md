@@ -1,6 +1,6 @@
 # Tools
 
-The model sees six built-in tools: `read_file`, `list_dir`, `grep`, `write_file`, `edit_file`, and `shell`. When at least one skill is loaded, `run_skill` follows those six. Its schema and result text are in [Skills](skills.md). MCP servers add more after that; see [MCP](mcp.md). Send them as an OpenAI tool list. `list_dir` has no `required` array. The other five built-in tools do.
+The model sees seven built-in tools: `read_file`, `list_dir`, `glob`, `grep`, `write_file`, `edit_file`, and `shell`. When at least one skill is loaded, `run_skill` follows those seven. Its schema and result text are in [Skills](skills.md). MCP servers add more after that; see [MCP](mcp.md). Send them as an OpenAI tool list. `list_dir` has no `required` array. The other six built-in tools do.
 
 ```json
 [
@@ -30,6 +30,21 @@ The model sees six built-in tools: `read_file`, `list_dir`, `grep`, `write_file`
         "properties": {
           "path": {"type": "string", "description": "Directory relative to the workspace. Default '.'."}
         }
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "glob",
+      "description": "Find files matching a glob pattern. * and ? match inside one path segment, and ** crosses directories. A pattern with no / matches the start directory, then the whole tree only when that directory has no match. Use **/*.py to search every level. Results are workspace-relative paths using /.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "pattern": {"type": "string", "description": "Glob pattern, with / as the separator."},
+          "path": {"type": "string", "description": "Directory to search. Default workspace root."}
+        },
+        "required": ["pattern"]
       }
     }
   },
@@ -83,7 +98,7 @@ The model sees six built-in tools: `read_file`, `list_dir`, `grep`, `write_file`
     "type": "function",
     "function": {
       "name": "shell",
-      "description": "Run a command in the workspace and return combined stdout and stderr. The user must approve the command before it runs. Prefer read_file, list_dir, grep, and edit_file for file work.",
+      "description": "Run a command in the workspace and return combined stdout and stderr. The user must approve the command before it runs. Prefer read_file, list_dir, glob, grep, and edit_file for file work.",
       "parameters": {
         "type": "object",
         "properties": {
@@ -106,7 +121,7 @@ Any exception the tool body raises is returned as `error: ` plus the exception t
 
 Strip the path. An empty path is `.`. Join it onto the resolved workspace and resolve the result, which follows symlinks. The resolved path must be the workspace itself or a descendant. Otherwise return `error: path escapes the workspace: {path as the model sent it}`.
 
-`read_file` and `edit_file` require the resolved path to be a file. `list_dir` requires a directory. `grep` accepts either.
+`read_file` and `edit_file` require the resolved path to be a file. `list_dir` and `glob` require a directory. `grep` accepts either.
 
 ## read_file
 
@@ -126,7 +141,37 @@ When the window is empty, including an offset past the end, return `[empty file,
 
 The default path is the workspace root. List only the directory's own entries, not children. Sort directories first, then files. Sort each group by `name.lower()`. A symlink to a directory counts as a directory. Directory names end with `/`, including on Windows. One entry per line, with no trailing newline after the last entry. An empty directory returns `[empty directory]`. A path that is not a directory returns `error: not a directory: {final name}`.
 
-`list_dir` does not skip `.git`, `.foo-ai`, or other hidden names. `grep` does.
+`list_dir` does not skip `.git`, `.foo-ai`, or other hidden names. `grep` and `glob` do.
+
+## glob
+
+`pattern` is required and must be a non-blank string, or the result is `error: pattern is required`. Strip it, then replace every `\` with `/`. Repeated `/` separators count as one, and a trailing `/` is dropped by that rule. A pattern that starts with `/`, or whose first segment is a drive prefix such as `C:`, returns `error: pattern must be relative`. A `..` segment returns `error: pattern must not contain '..'`.
+
+`path` is optional. The default is the workspace root. It must be a directory. A missing path or a file returns `error: not a directory: {final name}`.
+
+Search files under that directory. Do not descend into a directory whose name is `.git`, `.venv`, `venv`, `__pycache__`, `node_modules`, or `.foo-ai`. Do not follow directory symlinks. Skip a file whose resolved path is outside the workspace. Directories are not results.
+
+Match the pattern against each file's path relative to `path`, using `/`. The printed path is relative to the workspace and uses `/`.
+
+| Token | Meaning |
+| --- | --- |
+| `*` | Any run of characters in one segment, including a leading `.`. |
+| `?` | One character in one segment. |
+| `[abc]`, `[a-z]` | One character in that set. A range is inclusive when the start code point is less than or equal to the end. A `-` at either end of the class is literal. |
+| `[!abc]`, `[^abc]` | One character outside that set. |
+| `**` | When the whole segment is `**`, zero or more segments. Inside a longer segment, each `*` is the single-segment wildcard. |
+| other | That character. |
+
+An unclosed `[` is a literal `[`. A `]` immediately after `[`, `[!`, or `[^` is a member of the class. There is no escape character.
+
+A pattern with no `/` matches files in the start directory only. When that set is empty, match `**/` plus the pattern. `*.py` therefore finds Python files in nested directories when the start directory itself has none, and it does not look further when the start directory already has a match. A pattern that contains `/` is not retried. `**/*.py` matches at every level, including the start directory.
+
+Print one workspace-relative path per line, sorted by the path string, case-sensitive. No trailing newline after the last path. No matches returns `[no matches]`. Keep the first 200 paths and append a newline and `…[match limit reached]`.
+
+```text
+src/a.py
+src/b.py
+```
 
 ## grep
 

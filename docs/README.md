@@ -12,7 +12,7 @@ Truncation markers use the single character `…` (U+2026), not three periods.
 | --- | --- |
 | [Package](package.md) | Language, entry points, dependencies, and process order |
 | [Agent loop](agent-loop.md) | The step loop, CLI, printing, and system prompt |
-| [Tools](tools.md) | The six built-in tools, their schemas, and their result text |
+| [Tools](tools.md) | The seven built-in tools, their schemas, and their result text |
 | [Skills](skills.md) | Skill files, `run_skill`, and subagent runs |
 | [MCP](mcp.md) | Stdio MCP servers and the tools they add |
 | [Context](context.md) | Compress, summarize, or discard at 80% of the context window |

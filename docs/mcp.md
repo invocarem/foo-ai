@@ -92,7 +92,7 @@ The advertised name is `mcp__{server}__{tool}`, for example `mcp__whitaker__anal
 
 When that full name is longer than 64 characters, take the SHA-256 hex digest of the full name's UTF-8 bytes, keep the first 8 hex characters, and use the first 55 characters of the full name with trailing underscores removed, then `_`, then those 8 hex characters. The result matches `^[A-Za-z0-9_-]+$` and is at most 64 characters. Two long names that share a 55-character prefix still differ in the digest.
 
-If the sanitized name is one of the six built-in names, or it was already added by this process, skip that tool. Do not rename it further. If every named tool was skipped, the startup line is `mcp {name}: connected, tool names already in use`. If the server listed no named tools, the line is `mcp {name}: connected, no tools`.
+If the sanitized name is one of the seven built-in names, or it was already added by this process, skip that tool. Do not rename it further. If every named tool was skipped, the startup line is `mcp {name}: connected, tool names already in use`. If the server listed no named tools, the line is `mcp {name}: connected, no tools`.
 
 The schema sent to the model is:
 
