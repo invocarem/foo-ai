@@ -11,11 +11,27 @@
 <div class="app" id="app">
 
   <header class="topbar">
-    <button class="icon" id="toggle-left" title="Collapse navigation ( [ )" aria-label="Collapse navigation" aria-pressed="true">
-      <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2 4h12M2 8h12M2 12h12"/></svg>
+    <button class="icon" id="toggle-left" title="Collapse left pane ( [ )" aria-label="Collapse left pane" aria-pressed="true">
+      <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 3h10v10H3zM7 3v10"/></svg>
     </button>
     <div class="brand">
-      <span class="mark" aria-hidden="true"></span>
+      <span class="mark" aria-hidden="true">
+        <svg viewBox="0 0 32 32">
+          <defs>
+            <linearGradient id="brand-mark" gradientUnits="userSpaceOnUse"
+                            x1="7" y1="8" x2="25" y2="24">
+              <stop offset="0" stop-color="#5b8cff"/>
+              <stop offset="1" stop-color="#8f6bff"/>
+            </linearGradient>
+          </defs>
+          <g fill="none" stroke="url(#brand-mark)" stroke-width="3"
+             stroke-linecap="round" stroke-linejoin="round">
+            <path d="M14.5 9.5H8.5V22.5"/>
+            <path d="M8.5 16H13"/>
+            <path d="M19 22.5h4.5"/>
+          </g>
+        </svg>
+      </span>
       <span class="title">Foo AI</span>
       <span class="sub">coding agent</span>
     </div>
@@ -41,7 +57,11 @@
             <input id="workspace-path" type="text" spellcheck="false" placeholder="a project directory">
             <button class="primary" type="submit">Open</button>
           </form>
-          <div class="facts" id="workspace-facts"></div>
+          <div class="row">
+            <button class="ghost" id="workspace-browse" type="button"
+                    aria-expanded="false" aria-controls="workspace-picker">Browse…</button>
+          </div>
+          <div class="picker" id="workspace-picker" hidden></div>
         </section>
 
         <section class="pane">
@@ -64,9 +84,6 @@
         <section class="pane">
           <div class="pane-head"><h2>Session</h2><span class="hint" id="session-hint"></span></div>
           <div class="facts small" id="session-facts"></div>
-          <div class="row">
-            <button class="ghost" id="reset" type="button">New conversation</button>
-          </div>
         </section>
 
         <section class="pane" id="mcp-pane" hidden>
@@ -142,27 +159,41 @@
       <form class="sheet-form" id="settings-form">
         <div class="sheet-body">
           <section class="sheet-pane">
-            <h3>Workspace</h3>
-            <p class="sheet-note">The directory the tools may read and write. <b>Open</b> reads its
-              <b>.foo-ai/session.jsonl</b> and its <b>.foo-ai/skills</b>.</p>
-            <label class="sheet-field"><span>folder</span>
-              <input id="settings-workspace" type="text" spellcheck="false" placeholder="a project directory">
+            <h3>Provider</h3>
+            <p class="sheet-note">What a request sends. <b>Save provider</b> writes it to
+              <span class="mono" id="settings-file">–</span> and switches to it.</p>
+            <label class="sheet-field tight"><span>name</span>
+              <input id="settings-provider" type="text" readonly>
             </label>
-            <div class="facts small" id="settings-facts"></div>
-          </section>
-          <section class="sheet-pane">
-            <h3>Turn</h3>
-            <p class="sheet-note">What the page shows, and whether a shell command waits for you.</p>
-            <label class="check"><input type="checkbox" id="settings-thinking"><span>show thinking</span></label>
-            <label class="check"><input type="checkbox" id="settings-verbose"><span>verbose tool results</span></label>
-            <label class="check"><input type="checkbox" id="settings-yes"><span>run shell commands without asking</span></label>
-            <p class="sheet-note" id="settings-steps">step budget –</p>
+            <label class="sheet-field"><span>base url</span>
+              <input id="settings-base-url" type="text" spellcheck="false" placeholder="https://api.example.com/v1">
+            </label>
+            <label class="sheet-field"><span>model</span>
+              <input id="settings-model" type="text" spellcheck="false" placeholder="model name">
+            </label>
+            <label class="sheet-field"><span>window</span>
+              <input id="settings-window" type="text" inputmode="numeric" spellcheck="false" placeholder="context window in tokens, 0 for none">
+            </label>
+            <label class="sheet-field"><span>api key</span>
+              <input id="settings-key" type="password" autocomplete="off" spellcheck="false">
+            </label>
+            <label class="check"><input type="checkbox" id="settings-key-clear"><span>clear the stored key</span></label>
+            <div class="sheet-sub" id="settings-reasoning" hidden>
+              <h4>Local reasoning</h4>
+              <p class="sheet-note">Sent as <b>chat_template_kwargs</b> with every request.
+                A local server reads it; a cloud provider sends none, so this stays hidden.</p>
+              <label class="sheet-field"><span>reasoning effort</span>
+                <input id="settings-effort" type="text" spellcheck="false" placeholder="max">
+              </label>
+              <label class="check"><input type="checkbox" id="settings-thinking-param"><span>thinking</span></label>
+            </div>
+            <div class="row">
+              <button class="ghost" id="settings-provider-save" type="button">Save provider</button>
+            </div>
           </section>
         </div>
         <footer class="sheet-foot">
-          <span class="sheet-note" id="settings-note">Apply reads the workspace again.</span>
-          <button class="ghost" id="settings-cancel" type="button">Cancel</button>
-          <button class="primary" id="settings-apply" type="submit">Apply</button>
+          <button class="ghost" id="settings-cancel" type="button">Close</button>
         </footer>
       </form>
     </section>
@@ -181,7 +212,7 @@
       <form class="sheet-form" id="ask-form">
         <div class="sheet-body ask-body" id="ask-body"></div>
         <footer class="sheet-foot">
-          <span class="sheet-note">Dismiss sends no choice: Foo AI stops and waits for you.</span>
+          <span class="sheet-note">Type your own answer, or dismiss to stop and wait.</span>
           <button class="ghost" id="ask-dismiss" type="button">Dismiss</button>
           <button class="primary" id="ask-send" type="submit">Send answer</button>
         </footer>

@@ -100,3 +100,25 @@ Each repair result is:
 ```
 
 `ask` runs this repair before it appends the new user message. If the in-memory list changes, it saves that list before appending the user text. Load also runs the repair in memory, so a launch that then sends a message writes the repair and the new user message together.
+
+## Accepted decisions
+
+Accepted `ask` answers are stored at `.foo-ai/decisions.json`, not in the transcript, so a summary or a discard cannot drop them. The file is one JSON object:
+
+```json
+{
+  "decisions": [
+    {
+      "id": "dec-0123abcd4567ef89",
+      "key": "dec-0123abcd4567ef89",
+      "answer": "The user answered:\n- Library: httpx"
+    }
+  ]
+}
+```
+
+`id` is the id returned to the model. `key` is the id of the question text, and it matches `id` unless the model cited its own `decision_id`. `answer` is the summary without the `decision_id` line. Write the file as UTF-8 with `\n` line endings, indented by two spaces, through `.foo-ai/decisions.json.tmp`, then replace `decisions.json`. A missing file, or a file that is not this object, loads as an empty list.
+
+The user has already answered by the time the file is written, so a failed write does not fail the call. The answer stays in memory for this session, the temporary file is removed, and the tool result is returned as usual; only the copy a restart reads is missing.
+
+Load reads it after a transcript loads successfully. No session file, an empty session file, an unreadable session file, and `/reset` all delete `decisions.json`. A dismiss and the headless fallback are not stored.

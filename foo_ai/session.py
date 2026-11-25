@@ -7,6 +7,7 @@ import time
 from pathlib import Path
 
 from foo_ai.prompt import SYSTEM_PROMPT
+from foo_ai.tools import DecisionStore
 
 _INTERRUPTED = "error: interrupted before the tool result was saved"
 
@@ -71,6 +72,7 @@ class Session:
         self.path = self.directory / "session.jsonl"
         self.messages: list[dict] = [self._system()]
         self.note: str | None = None
+        self.decisions = DecisionStore(self.directory)
 
     def _system(self) -> dict:
         return system_message(self.prompt)
@@ -79,6 +81,7 @@ class Session:
         self.messages = [self._system()]
         self.note = None
         if not self.path.exists():
+            self.decisions.clear()
             return None
         try:
             text = self.path.read_text(encoding="utf-8")
@@ -87,6 +90,7 @@ class Session:
             return self.note
         if text.strip() == "":
             self.path.unlink()
+            self.decisions.clear()
             return None
         parsed: list[dict] = []
         for line in text.splitlines():
@@ -110,6 +114,7 @@ class Session:
             parsed.insert(0, self._system())
         repair_messages(parsed)
         self.messages = parsed
+        self.decisions.load()
         count = len(parsed) - 1
         self.note = f"Resumed .foo-ai/session.jsonl ({count} messages)."
         return self.note
@@ -120,6 +125,7 @@ class Session:
             broken.unlink()
         self.path.replace(broken)
         self.messages = [self._system()]
+        self.decisions.clear()
         return "Session file was unreadable and was renamed to .foo-ai/session.jsonl.broken."
 
     def save(self) -> None:
@@ -166,6 +172,7 @@ class Session:
     def reset(self) -> str:
         self.messages = [self._system()]
         if not self.path.exists():
+            self.decisions.clear()
             return "Conversation cleared."
         stamp = time.strftime("%Y%m%d-%H%M%S", time.localtime())
         destination = self.directory / f"session-{stamp}.jsonl"
@@ -174,5 +181,6 @@ class Session:
             destination = self.directory / f"session-{stamp}-{suffix}.jsonl"
             suffix += 1
         self.path.replace(destination)
+        self.decisions.clear()
         relative = destination.relative_to(self.workspace).as_posix()
         return f"Conversation cleared. Archived {relative}."

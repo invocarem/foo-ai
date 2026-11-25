@@ -25,11 +25,12 @@ same command.
 
 | Flag | Effect |
 | --- | --- |
-| `--workspace DIR` | Directory the tools may read and write. Defaults to the current directory. |
+| `--workspace DIR` | Directory the tools may read and write. Without it the page opens the folder it opened last, and the current directory is the last resort. A flag is not written, so it names the folder for this run only. |
 | `--provider NAME` | Named provider from `foo-ai.toml`. The page can switch it while idle. |
+| `--config PATH` | The settings file the page reads last and writes. Defaults to the user's configuration directory: `%APPDATA%\foo-ai\foo-ai.toml` on Windows, `$XDG_CONFIG_HOME/foo-ai/foo-ai.toml` or `~/.config/foo-ai/foo-ai.toml` elsewhere. `FOO_AI_CONFIG_DIR` names that directory instead. |
 | `--max-steps N` | Model rounds for one request. Overrides both config files, as in the CLI. |
 | `--show-thinking` | Start with reasoning shown. The page can toggle it. |
-| `--verbose` | Start with every tool result shown in full. The page can toggle it. |
+| `--verbose` | Start with every tool result kept in full. The card stays folded. The page can toggle it. |
 | `--yes` | Run shell commands without asking. The page can toggle it. |
 | `--host ADDR` | Address to serve on. Defaults to `127.0.0.1`. |
 | `--port PORT` | Port to serve on. `0` asks the system for a free one, which is the default. |
@@ -42,39 +43,93 @@ anything is served, exactly as in the CLI.
 
 ## What the page shows
 
-The page has the three panes of Burst, with the same tokens and component
-shapes: a top bar, a left pane, the stage, and a right pane.
+The page has a top bar, a left pane, the stage, and a right pane.
 
-- **Top bar**: the brand, the context meter for the last round, and the status
-  light: `ready`, `working`, `approval`, `question`, or `error`.
-- **Left pane**: the workspace and its step budget, the provider and its model,
-  base URL and window, the task list, the loaded skills, the session file and
-  its message count, and the MCP lines from startup. A skill button fills the
-  composer with its slash command.
-- **Stage**: the transcript and the composer. An answer streams into one card
-  per block; each tool call is a card whose result folds open. Reasoning sits in
+- **Top bar**: the two panel buttons, the brand and its prompt mark, the context
+  meter for the last round, and the status light: `ready`, `working`,
+  `approval`, `question`, or `error`. Each panel button draws a panel with its
+  outer edge marked: the left one hides the left pane, the right one hides the
+  activity pane. The stage keeps its room either way.
+- **Left pane**: the open workspace in the path field, with a folder picker under
+  it, the provider name with its base URL and window, the task list, the loaded
+  skills, the session file, its message count, the step budget, and the MCP
+  lines from startup. A skill button fills the composer with its slash command.
+- **Stage**: the transcript and the composer. The head shows the folder's name,
+  the provider, and the model, plus `thinking`, `verbose`, and `auto-approve`.
+  The full path stays in the workspace field. An answer streams into one card
+  per block; each tool call is a card whose result stays folded. Reasoning sits in
   a folded `thinking` block, and is only sent while `thinking` is on. A shell
   command opens the amber approval bar with `Deny` and `Run`.
 - **Right pane**: the activity log. Skill skips, the session note, the MCP
   lines, the context line of every round, tool names, answers, and errors.
 
+`Browse…` under the workspace field opens a picker: the folders of one
+directory, the path it is listing, a button up to the parent folder, and a
+`Use this folder` button under the list, which fills the path field. `Open` then
+loads that folder, so a mis-click in the list cannot move the session. The
+picker starts at the path in the field, or at the open workspace when the field
+is empty. A file path names its own folder, dot folders such as `.git` are not
+listed, and the top of a drive on Windows offers the other drives, so the picker
+can leave the one it started on. `Esc`, or a second click on `Browse…`, closes
+it.
+
 The task list is the one `todo_write` wrote: the pane shows `2/5 done` with a
 progress bar, the item in progress in the warning colour, and finished items
 struck through. It stays after the answer so the work can be read, and the next
-request clears it.
+request clears it. Opening the page again paints the last successful list from
+the session file, including a list the previous process wrote.
 
 `ask` opens a popup sheet, because the request waits for the answer: one card
-per question, with its header, the question, and its options. A single-choice
-question takes one radio button, `pick any` takes checkboxes, and each option
-carries its description. `Send answer` posts the picks; `Dismiss`, `Esc`, or the
-close button posts no choice, which tells the model to decide nothing and wait.
-A question that is still waiting reopens if the page is reloaded.
+per question, with its header, the question, its options, and a line for the
+user's own answer. A single-choice question takes one radio button, `pick any`
+takes checkboxes, and each option carries its description. Text in that line
+replaces the radio selection, and on `pick any` it is added to the checks.
+`Send answer` posts the picks; `Dismiss`, `Esc`, or the close button posts no
+choice, which tells the model to decide nothing and wait. A question that is
+still waiting reopens if the page is reloaded.
 
 `Enter` sends and `Shift+Enter` adds a line. `Ctrl+,` opens settings, `[` and `]`
 collapse the side panes, and `Esc` dismisses a question or closes a sheet.
 `/reset` archives the conversation, `/exit` closes the window, and a loaded
 skill runs as `/name arguments`. Any other line, including one that begins with
 `/`, is a user message, as in the CLI.
+
+Settings is a sheet for the provider the page is on. **Provider** edits
+its name, base URL, model, context window, and API key. `Save provider` writes
+that provider to the settings file named in the section, switches to it, and
+closes the sheet; `Enter` in one of its fields does the same. `Close` dismisses
+the sheet without writing. When that
+provider's table has no `extra_body`, the save also writes the one the request
+already sends, so `home` keeps this block in the file:
+
+```toml
+[providers.home.extra_body.chat_template_kwargs]
+reasoning_effort = "max"
+thinking = true
+```
+
+A provider whose body carries `chat_template_kwargs` also shows a **Local
+reasoning** block in that section, with `reasoning effort` and `thinking`, and
+the save writes those two keys into the block. Those are the keys the sheet
+owns: a blank `reasoning effort` drops that key, so the block can send
+`thinking` alone, and any other key of the block passes through as it is. The
+fields are hidden for a provider whose body carries no such block, which is
+`deepseek-flash_1` and every other cloud provider, and a save that posts them
+for one is refused.
+
+The stage head's `thinking`, `verbose`, and `auto-approve` checkboxes are the
+turn options. Each one is written to the settings file as it changes, so they
+are still on after a restart; `--show-thinking`, `--verbose`, and `--yes` turn
+one on for the run that names it. The step budget is shown under Session in the
+left pane.
+
+A table that already has `extra_body` keeps it, apart from the block the sheet
+edited: a reasoning save writes the whole body the request sends, so a body the
+launch file set keeps its other keys. The key is
+write-only: the page never reads it back, and the field only says whether one is
+stored. Leaving the key blank keeps the stored one, and `clear the stored key`
+removes it. The workspace is not in the sheet: the left pane opens a folder, and
+that is the only place it changes.
 
 ## While a request runs
 
@@ -103,9 +158,10 @@ The page is a document plus a small JSON API. Every write is a `POST` with
 | --- | --- |
 | `GET /` | The document. |
 | `GET /static/<file>` | `styles.css`, `app.js`, and `favicon.svg` from the package. |
-| `GET /api/state` | Workspace, provider, providers, step budget, skills, MCP lines, session facts, toggles, and the last context line. |
+| `GET /api/state` | Workspace, provider, providers, the settings file, step budget, skills, MCP lines, session facts, toggles, and the last context line. The provider carries `api_key_set`, never the key, and `chat_template_kwargs`, or `null` for a provider that sends no local reasoning block. |
 | `GET /api/history` | The resumed transcript, one object per stored message. |
 | `GET /api/events?after=N` | The events after sequence `N`, the status, the pending command, and the last context line. |
+| `GET /api/browse?path=DIR` | The folders under one directory, for the workspace picker: `{"ok": true, "path": "...", "parent": "..." or null, "entries": [{"name": "...", "path": "..."}]}`. No `path` reads the open workspace, a file path names its own folder, and a path that is not there answers `{"ok": false, "error": "no such folder: ..."}`. |
 | `POST /api/ask` | `{"text": "..."}` starts one request. |
 | `POST /api/slash` | `{"command": "/review focus"}` runs a loaded skill. |
 | `POST /api/reset` | Archives the session file and starts a new conversation. |
@@ -113,6 +169,7 @@ The page is a document plus a small JSON API. Every write is a `POST` with
 | `POST /api/approve` | `{"approve": true}` answers a waiting shell command. |
 | `POST /api/settings` | `{"thinking": ..., "verbose": ..., "yes": ...}` sets the toggles. |
 | `POST /api/provider` | `{"name": "..."}` switches provider while idle. |
+| `POST /api/provider/save` | `{"name": "...", "base_url": "...", "model": "...", "context_window": N, "api_key": "...", "chat_template_kwargs": {"reasoning_effort": "...", "thinking": true}}` writes that provider to the settings file and switches to it. An absent `api_key` keeps the stored key, and `""` clears it. An absent `chat_template_kwargs` keeps the body as it is, and a provider that sends none refuses one. |
 | `POST /api/workspace` | `{"path": "..."}` loads another workspace while idle. |
 | `POST /api/answer` | `{"answers": [{"id": "...", "selected": ["..."]}]}` answers a waiting `ask` question. |
 
@@ -158,11 +215,25 @@ another model round. `Stop` cancels instead, which ends the turn as interrupted.
 Auto-approve does not answer a question, because the choice is the user's.
 
 `todo_write` publishes the list the moment it runs, as a `todos` event and as
-`todos` in `GET /api/state`. The next request starts by clearing it.
+`todos` in `GET /api/state`. The next request starts by clearing it. A new
+process reads the last successful `todo_write` result out of the session file
+and returns that list from `GET /api/state` before the next request.
 
 Switching provider rebuilds the client and keeps the transcript. Switching
 workspace rebuilds everything for that folder: its `.foo-ai.toml`, its skills,
-and its session file. Both are refused while a request runs.
+and its session file, and it writes that folder to the settings file, so the next
+launch opens it. Both are refused while a request runs. Saving a provider
+writes the settings file and then switches to it, so it is refused in the same
+way.
+
+The settings file is a `foo-ai.toml` the page owns. It is read after the launch
+file, so the values the sheet shows are the values a request sends, and it is
+written whole and atomically, private to the user where the platform has file
+modes. It carries `workspace` for the folder the page opened last,
+`default_provider`, `[providers.*]`, and `[page]` for the turn
+options, and nothing else: MCP servers and the step budget belong to the launch
+file and the workspace. A packaged app needs it because the install directory has
+no `foo-ai.toml` of its own, and a user cannot write to that directory anyway.
 
 ## Security
 
@@ -176,11 +247,15 @@ The page can run shell commands, so the server is narrow on purpose.
   sends one, an `Origin` equal to that host. A page of another origin cannot
   drive the agent.
 - `GET /static/<file>` serves one file name in the package directory. There is
-  no path traversal and no directory listing.
+  no path traversal.
+- `GET /api/browse` lists the folders of one directory, because the workspace
+  picker needs them. It is a read for the page, so the `Host` check guards it,
+  and it changes nothing the agent may read or write: the tools stay inside the
+  open workspace.
 
 ## The desktop window
 
-`desktop/` is an Electron shell around the page, the way Burst wraps its viewer.
+`desktop/` is an Electron shell around the page.
 It starts `python -m foo_ai.gui --no-browser --host 127.0.0.1 --port <free>`,
 waits for the `foo-ai-desktop:` line, and shows that address in a window with a
 hidden title bar in the page's own colour. Closing the window stops the server.
@@ -188,18 +263,26 @@ hidden title bar in the page's own colour. Closing the window stops the server.
 ```sh
 cd desktop
 npm install
+
+# Open the desktop window.
 npm start
+
+# Build for this machine: an NSIS installer on Windows, an AppImage on Linux.
+npm run dist
+
+# Build the Windows NSIS installer.
+npm run dist:win
 ```
 
-`npm run dist` builds for the machine you are on: an AppImage on Linux, an NSIS
-installer on Windows. `npm run dist:win` still builds that Windows installer.
 The build copies `foo_ai/` beside the executable. `desktop/node_modules` and
 `desktop/release` are not committed.
 
-The app icon is `desktop/build/icon.svg`: the prompt chevron and the cursor from
-the page's favicon, in the page's blue-to-violet gradient on the window's dark
-plate. The window hands the ICO to Electron, and the installer build embeds it
-in `FooAI.exe`, in the installer, and in its shortcuts. `signExecutable: false`
+The app icon is `desktop/build/icon.svg`: the page's prompt mark, the name's F
+and the prompt's underscore in two cells, in the page's blue-to-violet gradient
+on the window's dark plate. Two cells and not three, because at 16 pixels a
+third cell leaves each stroke thinner than a pixel. The window hands the ICO to
+Electron, and the installer build embeds it in `FooAI.exe`, in the installer,
+and in its shortcuts. `signExecutable: false`
 skips the signature only; the icon and the version fields are still written.
 `icon.png` (512×512) and a multi-size `icon.ico` are rendered from the SVG and
 committed with it, so a build needs no image tool; changing the drawing means

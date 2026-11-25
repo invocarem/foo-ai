@@ -1,31 +1,34 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
-  <!-- Foo AI's desktop icon: the prompt mark from the page's favicon, a chevron
-       and a cursor, in the page's blue-to-violet gradient on its dark plate.
-       The plate follows the window colours (#141a26 title bar, #0b0e14 page).
-       Strokes are 58 of 512 so the glyph still reads at 16 pixels. -->
+  <!-- Foo AI's desktop icon: the page's prompt mark, the name's F and the
+       prompt's underscore, in the page's blue-to-violet gradient on its dark
+       plate. Two cells of one text row and not three, so each cell keeps the
+       room a stroke needs at 16 pixels. The plate follows the window colours
+       (#141a26 title bar, #0b0e14 page). Strokes are 56 of 512 so the glyph
+       still reads at 16 pixels. -->
   <defs>
     <linearGradient id="plate" x1="0" y1="0" x2="0.7" y2="1">
       <stop offset="0" stop-color="#1c2536"/>
       <stop offset="0.55" stop-color="#121824"/>
       <stop offset="1" stop-color="#0a0d13"/>
     </linearGradient>
-    <linearGradient id="mark" gradientUnits="userSpaceOnUse" x1="112" y1="122" x2="400" y2="390">
+    <linearGradient id="mark" gradientUnits="userSpaceOnUse" x1="112" y1="128" x2="400" y2="384">
       <stop offset="0" stop-color="#7aa2ff"/>
       <stop offset="0.5" stop-color="#5b8cff"/>
       <stop offset="1" stop-color="#9a76ff"/>
     </linearGradient>
-    <radialGradient id="glow" cx="0.5" cy="0.46" r="0.5">
+    <radialGradient id="glow" cx="0.5" cy="0.48" r="0.5">
       <stop offset="0" stop-color="#5b8cff" stop-opacity="0.26"/>
       <stop offset="0.55" stop-color="#5b8cff" stop-opacity="0.09"/>
       <stop offset="1" stop-color="#5b8cff" stop-opacity="0"/>
     </radialGradient>
   </defs>
   <rect width="512" height="512" rx="116" fill="url(#plate)"/>
-  <circle cx="256" cy="240" r="212" fill="url(#glow)"/>
+  <circle cx="256" cy="248" r="212" fill="url(#glow)"/>
   <rect x="1.5" y="1.5" width="509" height="509" rx="114.5" fill="none"
         stroke="#ffffff" stroke-opacity="0.07" stroke-width="3"/>
-  <g fill="none" stroke="url(#mark)" stroke-width="58" stroke-linecap="round" stroke-linejoin="round">
-    <path d="M131 148L254 256L131 364"/>
-    <path d="M324 364H381"/>
+  <g fill="none" stroke="url(#mark)" stroke-width="56" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M228 156H140V356"/>
+    <path d="M140 256H208"/>
+    <path d="M300 356H372"/>
   </g>
 </svg>

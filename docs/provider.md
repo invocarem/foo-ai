@@ -36,6 +36,23 @@ Inside the file, apply tables in this order:
 2. Each `[providers.{name}]` table. A name that is not built in starts as a copy of `home`: the same URL, model, context window, empty key, and home's extra body. The table then replaces a field only when that key is present. A non-blank `base_url` or `model` replaces that field. An `api_key` key that is not null replaces the key, and `""` clears it. `context_window` becomes an integer. A bool, a negative number, or any other value that is not an integer, a float, or a digit string becomes `0`. A float is truncated toward zero. Underscores in a digit string are removed, so `"1_000_000"` is `1000000`. When `extra_body` is a table, that object replaces the provider's extra body. It is not deep-merged. Omitting `extra_body` on a new name leaves home's thinking flags in place.
 3. A legacy `[provider]` table, if present. Its `name` field selects which provider it updates. With no `name`, it updates the default chosen so far. The same field rules apply. If the file has no `default_provider` key, this name becomes the default. If `default_provider` is present, it stays the selection and the legacy table only updates that named provider.
 
+The desktop page reads one more file after the launch file: the settings file it
+owns. `--config PATH` names it; otherwise it is
+`%APPDATA%\foo-ai\foo-ai.toml` on Windows, and
+`$XDG_CONFIG_HOME/foo-ai/foo-ai.toml` or `~/.config/foo-ai/foo-ai.toml`
+elsewhere, with `FOO_AI_CONFIG_DIR` naming that directory instead. The provider
+loader takes `default_provider` and `[providers.*]` from it, so a workspace
+`.foo-ai.toml` still cannot change a provider; a `[page]` table there holds the
+page's turn options, and MCP servers and the step budget in it are ignored. Its
+`workspace` key is the folder the page opened last, which a launch without
+`--workspace` opens.
+Because it is read last, it wins over the launch file for the keys it names: what
+the page's Settings sheet shows is what a request sends. `Save provider` in that
+sheet writes it, whole and atomically, private to the user where the platform has
+file modes. The sheet's `reasoning effort` and `thinking` fields write
+`extra_body.chat_template_kwargs` in that file, the same block a hand-written
+table holds. See [Desktop page](gui.md).
+
 `foo-ai.example.toml` shows the file shape. Copy it to `foo-ai.toml`. The local file can contain API keys and is gitignored.
 
 ```toml

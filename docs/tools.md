@@ -137,7 +137,7 @@ The model sees nine built-in tools: `read_file`, `list_dir`, `glob`, `grep`, `wr
     "type": "function",
     "function": {
       "name": "ask",
-      "description": "Ask the user 1 to 3 multiple-choice questions when a decision is theirs to make and you cannot settle it from the request, the code, or a sensible default. Each question has a short header, the question text, 2 to 4 options, and multiSelect when more than one option may apply. Put any recommended option first. Do not use this for a decision with an obvious default.",
+      "description": "Ask the user 1 to 3 multiple-choice questions when a decision is theirs to make and you cannot settle it from the request, the code, or a sensible default. Each question has a short header, the question text, 2 to 4 options, and multiSelect when more than one option may apply. Put any recommended option first. The user may also type their own answer. Do not use this for a decision with an obvious default. The same ambiguity is asked only once: a later call returns the accepted decision. To reopen it, pass that decision_id and new_evidence.",
       "parameters": {
         "type": "object",
         "properties": {
@@ -169,7 +169,9 @@ The model sees nine built-in tools: `read_file`, `list_dir`, `glob`, `grep`, `wr
               },
               "required": ["header", "question", "options"]
             }
-          }
+          },
+          "decision_id": {"type": "string", "description": "Required when reopening a previously accepted decision. Cite the decision_id from that answer."},
+          "new_evidence": {"type": "string", "description": "Required with decision_id when asking again after the user already accepted a choice."}
         },
         "required": ["questions"]
       }
@@ -340,17 +342,30 @@ On a terminal, print each question before reading its answer. A leading newline,
 
 | `multiSelect` | Prompt |
 | --- | --- |
-| false | `Choose one [1-{count}]: ` |
-| true | `Choose any [1-{count}], comma-separated: ` |
+| false | `Choose one [1-{count}], or type your own answer: ` |
+| true | `Choose any [1-{count}], comma-separated, or type your own answer: ` |
 
-Flush, then read one line. A blank line leaves that question unanswered. EOF prints a newline and dismisses the whole batch, including questions already answered. A line that is not a valid choice prints an error, prints the same prompt again, and reads another line.
+Flush, then read one line. A blank line leaves that question unanswered. EOF prints a newline and dismisses the whole batch, including questions already answered. A line whose tokens are all numbers, but not a valid choice, prints an error, prints the same prompt again, and reads another line. Any other non-blank line is the user's own answer: the stripped line, as one selection.
 
 | Line | Result |
 | --- | --- |
 | one in-range number | That option, for either mode. |
 | several in-range numbers, separated by commas or whitespace | Those options, in order, duplicates removed, only when `multiSelect` is true. |
 | several numbers when `multiSelect` is false | `Enter one number from 1 to {count}.` |
-| anything else that is not blank | `Enter a number from 1 to {count}.`, or for `multiSelect`, `Enter numbers from 1 to {count}, separated by commas.` |
+| numbers outside that range | `Enter a number from 1 to {count}.`, or for `multiSelect`, `Enter numbers from 1 to {count}, separated by commas.` |
+| any other non-blank line | That stripped line is the user's own answer. |
+
+`decision_id` and `new_evidence` are optional. A present `decision_id` must be a string, or the result is `error: decision_id must be a string`. A blank or whitespace-only `decision_id` is the same as a missing one: the call uses the ambiguity id, as if the key were absent. A present `new_evidence` must be a string, or the result is `error: new_evidence must be a string`. Whitespace-only `new_evidence` does not reopen a decision.
+
+The same ambiguity is not asked twice. The ambiguity id is `dec-` plus the first 16 hex characters of the SHA-256 of each question's stripped lower-case header, question, and option labels, in that order, with a NUL after each piece. Accepted answers are stored in `.foo-ai/decisions.json`. See [Session](session.md).
+
+| Call | Result, without asking |
+| --- | --- |
+| no `decision_id`, and the ambiguity id is already stored | `Host reused accepted decision {id} for the same ambiguity. The user already chose: {answer}. Continue with that decision; to reopen it, cite decision_id {id} and supply new_evidence.` |
+| `decision_id` names a stored decision, and `new_evidence` is blank | `Host reused accepted decision {id}. The user already chose: {answer}. Continue with that decision unless you supply decision_id and new_evidence.` |
+| `decision_id` names nothing, and some decision is already stored | `error: unknown decision_id {Python repr}; cite the original accepted decision_id and include new_evidence to reopen it` |
+
+A matching `decision_id` with non-blank `new_evidence` asks again and replaces that decision. A `decision_id` that names nothing, when nothing is stored yet, asks and stores the answer under the cited id. The headless fallback and a dismiss are not stored.
 
 The tool result when at least one question has a selection:
 
@@ -358,11 +373,13 @@ The tool result when at least one question has a selection:
 The user answered:
 - Library: requests
 - Scope: (left unanswered — don't assume a choice)
+
+decision_id: dec-0123abcd4567ef89
 ```
 
-The header is the label before the colon. Selections are joined with `, `. A question with no selection uses `(left unanswered — don't assume a choice)`. Labels the user did not offer are dropped. When `multiSelect` is false, only the first remaining label is kept.
+The header is the label before the colon. Selections are joined with `, `. A question with no selection uses `(left unanswered — don't assume a choice)`. A selection is kept after its whitespace is collapsed, including text the user typed that is not one of the option labels. When `multiSelect` is false, only the first remaining selection is kept. The stored answer is the summary above the blank line. The tool result appends a blank line and `decision_id: {id}`.
 
-When every question is unanswered, or the user hits EOF, the result is this sentence and the turn stops after the rest of the tool calls in that assistant message have run. Do not take another model round. Do not store another assistant message.
+When every question is unanswered, or the user hits EOF, the result is this sentence. Later tool calls in that assistant message do not run. Do not take another model round. Do not store another assistant message.
 
 ```text
 The user dismissed the question without choosing — read this as "don't decide for me, let's just talk." Do not pick an option, run a tool, or take any further action toward this; stop and wait for the user's next message.

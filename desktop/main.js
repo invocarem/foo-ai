@@ -157,20 +157,23 @@ function workspaceFromArgv(argv) {
 
 function startServer(port, workspace) {
   const python = pythonInvocation();
+  // A folder named on the command line is this run's workspace. Without one the
+  // page opens the folder it opened last, and this process's directory is the
+  // last resort, so nothing is passed here for that case.
+  const args = [
+    ...python.args,
+    '-m',
+    'foo_ai.gui',
+    '--no-browser',
+    '--host',
+    '127.0.0.1',
+    '--port',
+    String(port),
+  ];
+  if (workspace) args.push('--workspace', workspace);
   const child = spawn(
     python.command,
-    [
-      ...python.args,
-      '-m',
-      'foo_ai.gui',
-      '--no-browser',
-      '--host',
-      '127.0.0.1',
-      '--port',
-      String(port),
-      '--workspace',
-      workspace,
-    ],
+    args,
     {
       cwd: repoRoot(),
       windowsHide: true,
@@ -222,15 +225,16 @@ function loadingPage() {
   .top { height: 48px; box-sizing: border-box; background: ${TITLE_BAR};
     border-bottom: 1px solid #1f2734; display: flex; align-items: center;
     gap: 8px; padding: 0 14px 0 14px; padding-right: 150px; -webkit-app-region: drag; }
-  .mark { width: 9px; height: 9px; border-radius: 3px;
-    background: linear-gradient(135deg, #5b8cff, #8f6bff); }
+  .mark { width: 14px; height: 14px; display: grid; place-items: center; }
+  .mark svg { width: 100%; height: 100%;
+    filter: drop-shadow(0 0 4px rgba(91, 140, 255, .45)); }
   .title { color: #dde4f0; font-weight: 620; }
   .sub { color: #5e6a80; font-size: 11px; }
   main { height: calc(100% - 48px); display: grid; place-items: center; }
 </style>
 </head>
 <body>
-  <div class="top"><span class="mark"></span><span class="title">Foo AI</span><span class="sub">coding agent</span></div>
+  <div class="top"><span class="mark"><svg viewBox="0 0 32 32"><defs><linearGradient id="brand-mark" gradientUnits="userSpaceOnUse" x1="7" y1="8" x2="25" y2="24"><stop offset="0" stop-color="#5b8cff"/><stop offset="1" stop-color="#8f6bff"/></linearGradient></defs><g fill="none" stroke="url(#brand-mark)" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M14.5 9.5H8.5V22.5"/><path d="M8.5 16H13"/><path d="M19 22.5h4.5"/></g></svg></span><span class="title">Foo AI</span><span class="sub">coding agent</span></div>
   <main>Starting the agent\u2026</main>
 </body>
 </html>`;
@@ -349,7 +353,7 @@ function fail(error) {
 
 async function boot() {
   app.setAppUserModelId('io.foo-ai.desktop');
-  const workspace = workspaceFromArgv(process.argv) || repoRoot();
+  const workspace = workspaceFromArgv(process.argv);
   const port = await freePort();
   server = startServer(port, workspace);
   const announced = onceLine(server, ANNOUNCE);

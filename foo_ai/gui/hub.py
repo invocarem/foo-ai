@@ -20,25 +20,77 @@ from __future__ import annotations
 import re
 import threading
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from foo_ai.agent import Agent
 from foo_ai.client import ChatError, Client
-from foo_ai.config import ConfigError, known_providers, load_config
+from foo_ai.config import (
+    ConfigError,
+    known_providers,
+    load_config,
+    load_page_settings,
+    local_reasoning,
+    merge_reasoning,
+    save_page_settings,
+    save_page_workspace,
+    write_provider_settings,
+)
 from foo_ai.mcp import McpPool
 from foo_ai.session import Session
 from foo_ai.skill import load_skills, match_slash, system_prompt
-from foo_ai.tools import Toolbox
+from foo_ai.tools import Toolbox, latest_todos
 
 _EVENT_LIMIT = 20_000
 _WAIT = 0.1
 # A round that sends nothing for this long is a stall, not a slow answer: the
 # page would otherwise show "working" forever. 0 turns the bound off.
 _READ_TIMEOUT = 300.0
+# ``save_provider`` reads this as "the key in the file stays as it is".
+KEEP_KEY = object()
 _USAGE = re.compile(
     r"^context (?P<used>[0-9.]+[KM]?)(?:/(?P<window>[0-9.]+[KM]?))?"
     r" · usage total (?P<prompt>\d+) (?P<completion>\d+)"
     r"(?: · cache (?P<cache>[0-9.]+)%)?$"
 )
+
+
+def window_from_json(value: object) -> int | None:
+    """A context window from the page: a whole number of tokens, or ``None``."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value if value >= 0 else None
+    if isinstance(value, str):
+        digits = value.strip().replace("_", "")
+        if digits.isdigit():
+            return int(digits)
+    return None
+
+
+def reasoning_from_json(value: object) -> dict | None:
+    """The local reasoning block from the page, or ``None`` when it sends none.
+
+    ``reasoning_effort`` is free text, as the TOML table takes it, and a blank
+    one drops the key when the body is written, so a provider can send only
+    ``thinking``. Any other shape raises ``ValueError``, which the save reports
+    as a refusal.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise ValueError("chat_template_kwargs must be an object")
+    block: dict = {}
+    effort = value.get("reasoning_effort")
+    if effort is not None:
+        if not isinstance(effort, str):
+            raise ValueError("chat_template_kwargs.reasoning_effort must be a string")
+        block["reasoning_effort"] = effort.strip()
+    thinking = value.get("thinking")
+    if thinking is not None:
+        if not isinstance(thinking, bool):
+            raise ValueError("chat_template_kwargs.thinking must be true or false")
+        block["thinking"] = thinking
+    return block
 
 
 class Cancelled(BaseException):
@@ -138,10 +190,12 @@ class Hub:
         thinking: bool = False,
         client_factory=None,
         read_timeout: float | None = _READ_TIMEOUT,
+        user_config: Path | None = None,
     ):
         self.workspace = Path(workspace).expanduser().resolve()
         self.provider_flag = provider
         self.max_steps_flag = max_steps
+        self.user_config = None if user_config is None else Path(user_config).expanduser()
         self.yes = bool(yes)
         self.verbose = bool(verbose)
         self.thinking = bool(thinking)
@@ -172,6 +226,12 @@ class Hub:
 
     def start(self) -> None:
         """Load the configuration, start the MCP servers, and read the session."""
+        page = load_page_settings(self.user_config)
+        # A launch flag turns an option on for this run; the saved value keeps
+        # the ones no flag named. Both only ever turn an option on.
+        self.thinking = self.thinking or page["thinking"]
+        self.verbose = self.verbose or page["verbose"]
+        self.yes = self.yes or page["yes"]
         self._build()
         for line in self.skipped:
             self._emit("notice", line.strip())
@@ -202,17 +262,21 @@ class Hub:
         session that was already loaded in place.
         """
         target = self.workspace if workspace is None else workspace
-        config = load_config(self.provider_flag, workspace=target)
+        config = load_config(self.provider_flag, workspace=target, user_config=self.user_config)
         pool = McpPool(config.mcp_servers)
         try:
             mcp_lines = pool.connect()
             skills = load_skills(target)
             session = Session(target, prompt=system_prompt(skills))
             note = session.load()
+            toolbox = Toolbox(target, self.confirm, pool, skills, asker=self.ask_user, decisions=session.decisions)
+            restored = latest_todos(session.messages)
+            if restored is not None:
+                toolbox.todos = restored
             agent = Agent(
                 provider=config.provider,
                 session=session,
-                toolbox=Toolbox(target, self.confirm, pool, skills, asker=self.ask_user),
+                toolbox=toolbox,
                 client=self._make_client(config.provider),
                 sink=self.sink,
                 max_steps=self._budget(config),
@@ -231,11 +295,21 @@ class Hub:
         self.agent = agent
         self.providers = self._providers()
         self._usage = None
+        self._todos = [dict(item) for item in agent.toolbox.todos]
         if old is not None:
             old.close()
 
     def _budget(self, config) -> int:
         return self.max_steps_flag if self.max_steps_flag is not None else config.max_steps
+
+    def _apply_config(self, config) -> None:
+        """Use a freshly loaded configuration on the agent already running."""
+        self.config = config
+        self.provider_flag = config.provider.name
+        self.agent.provider = config.provider
+        self.agent.client = self._make_client(config.provider)
+        self.agent.max_steps = self._budget(config)
+        self._usage = None
 
     def _make_client(self, provider):
         """The client for a provider: the caller's factory, else one with the stall bound."""
@@ -285,8 +359,11 @@ class Hub:
                     "model": provider.model,
                     "base_url": provider.base_url,
                     "context_window": provider.context_window,
+                    "api_key_set": bool(provider.api_key),
+                    "chat_template_kwargs": local_reasoning(provider.extra_body),
                 },
                 "providers": list(self.providers),
+                "settings_file": None if self.user_config is None else str(self.user_config),
                 "max_steps": None if self.agent is None else self.agent.max_steps,
                 "skills": []
                 if self.skills is None
@@ -311,7 +388,7 @@ class Hub:
 
     def _providers(self) -> list[str]:
         try:
-            return known_providers()
+            return known_providers(user_config=self.user_config)
         except ConfigError:
             return []
 
@@ -515,18 +592,20 @@ class Hub:
         yes: bool | None = None,
     ) -> dict:
         with self._lock:
-            if verbose is not None:
-                self.verbose = bool(verbose)
-            if thinking is not None:
-                self.thinking = bool(thinking)
-            if yes is not None:
-                self.yes = bool(yes)
-            return {
-                "ok": True,
-                "verbose": self.verbose,
-                "thinking": self.thinking,
-                "yes": self.yes,
+            wanted = {
+                "verbose": self.verbose if verbose is None else bool(verbose),
+                "thinking": self.thinking if thinking is None else bool(thinking),
+                "yes": self.yes if yes is None else bool(yes),
             }
+            if self.user_config is not None:
+                try:
+                    save_page_settings(self.user_config, **wanted)
+                except ConfigError as exc:
+                    return {"ok": False, "error": str(exc)}
+            self.verbose = wanted["verbose"]
+            self.thinking = wanted["thinking"]
+            self.yes = wanted["yes"]
+            return {"ok": True, **wanted}
 
     def set_provider(self, name: str) -> dict:
         name = name.strip()
@@ -536,18 +615,114 @@ class Hub:
             if self.status != "idle":
                 return {"ok": False, "error": "a request is running"}
             try:
-                config = load_config(name, workspace=self.workspace)
+                config = load_config(name, workspace=self.workspace, user_config=self.user_config)
             except ConfigError as exc:
                 return {"ok": False, "error": str(exc)}
-            self.config = config
-            self.provider_flag = config.provider.name
-            self.agent.provider = config.provider
-            self.agent.client = self._make_client(config.provider)
-            self.agent.max_steps = self._budget(config)
-            self._usage = None
+            self._apply_config(config)
             provider = config.provider
         self._emit("notice", f"Provider {provider.name} · {provider.model}")
         return {"ok": True}
+
+    def save_provider(
+        self,
+        name: str,
+        *,
+        base_url: str,
+        model: str,
+        context_window: object,
+        api_key: object = KEEP_KEY,
+        chat_template_kwargs: object = None,
+    ) -> dict:
+        """Write a provider into the settings file, then use it.
+
+        The key is write-only: the page never reads it back, and an absent
+        ``api_key`` keeps the one already in the file.
+
+        ``chat_template_kwargs`` is the local reasoning block the page edited.
+        An absent one keeps the body as it is. A provider that sends no such
+        block refuses one: the fields belong to the server that reads them.
+
+        The save writes the whole body the request would send, so a body that
+        comes from the launch file keeps its other keys, and a key of the block
+        the sheet does not show passes through.
+        """
+        name = name.strip()
+        if name == "":
+            return {"ok": False, "error": "the provider name is empty"}
+        if self.user_config is None:
+            return {"ok": False, "error": "there is no settings file to write"}
+        known = self._providers()
+        if name not in known:
+            listed = ", ".join(sorted(known))
+            return {"ok": False, "error": f"unknown provider {name!r}; known providers: {listed}"}
+        url = base_url.strip()
+        parts = urlsplit(url)
+        if parts.scheme not in {"http", "https"} or not parts.netloc:
+            return {"ok": False, "error": "base_url must be an http or https address"}
+        model = model.strip()
+        if model == "":
+            return {"ok": False, "error": "model is empty"}
+        window = window_from_json(context_window)
+        if window is None:
+            return {"ok": False, "error": "context_window must be zero or a positive integer"}
+        if api_key is KEEP_KEY:
+            key = None
+        elif isinstance(api_key, str):
+            key = api_key.strip()
+        else:
+            return {"ok": False, "error": "api_key must be a string"}
+        try:
+            reasoning = reasoning_from_json(chat_template_kwargs)
+        except ValueError as exc:
+            return {"ok": False, "error": str(exc)}
+        with self._lock:
+            if self.status != "idle":
+                return {"ok": False, "error": "a request is running"}
+            try:
+                current = load_config(name, workspace=self.workspace, user_config=self.user_config)
+            except ConfigError as exc:
+                return {"ok": False, "error": str(exc)}
+            if reasoning is not None and local_reasoning(current.provider.extra_body) is None:
+                return {
+                    "ok": False,
+                    "error": f"provider {name} sends no chat_template_kwargs; only a local provider has them",
+                }
+            try:
+                # The body the request already sends. A table that omits
+                # extra_body keeps the built-in one, so record it on the way
+                # out; a table that already has one is left as written. The
+                # reasoning fields are the one edit the sheet makes to it.
+                body = current.provider.extra_body
+                if reasoning is not None:
+                    body = merge_reasoning(body, reasoning)
+                write_provider_settings(
+                    self.user_config,
+                    name,
+                    base_url=url,
+                    model=model,
+                    context_window=window,
+                    api_key=key,
+                    extra_body=body,
+                    replace_extra_body=reasoning is not None,
+                )
+                config = load_config(name, workspace=self.workspace, user_config=self.user_config)
+            except ConfigError as exc:
+                return {"ok": False, "error": str(exc)}
+            self._apply_config(config)
+            self.providers = self._providers()
+            provider = config.provider
+        self._emit("notice", f"Provider {provider.name} · {provider.model} saved")
+        return {
+            "ok": True,
+            "provider": {
+                "name": provider.name,
+                "model": provider.model,
+                "base_url": provider.base_url,
+                "context_window": provider.context_window,
+                "api_key_set": bool(provider.api_key),
+                "chat_template_kwargs": local_reasoning(provider.extra_body),
+            },
+        }
 
     def set_workspace(self, raw: str) -> dict:
         raw = raw.strip()
@@ -568,12 +743,23 @@ class Hub:
                 self._build(resolved)
             except ConfigError as exc:
                 return {"ok": False, "error": str(exc)}
+            # The page opens with the folder it opened last, so remember this one
+            # now that it has loaded. A failed write does not undo the switch: the
+            # folder is open either way, and only the next launch misses it.
+            note = ""
+            if self.user_config is not None:
+                try:
+                    save_page_workspace(self.user_config, self.workspace)
+                except ConfigError as exc:
+                    note = f"could not remember the workspace: {exc}"
         for line in self.skipped:
             self._emit("notice", line.strip())
         if self.note:
             self._emit("notice", self.note)
         for line in self.mcp_lines:
             self._emit("notice", line)
+        if note:
+            self._emit("notice", note)
         self._emit("notice", f"Workspace {self.workspace}")
         return {"ok": True}
 

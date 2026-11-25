@@ -10,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import tomllib
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -22,7 +23,20 @@ from foo_ai import __version__
 from foo_ai.agent import Agent
 from foo_ai.cli import build_parser, main
 from foo_ai.client import ChatError, Client, Completion, _normalize_calls
-from foo_ai.config import ConfigError, Provider, completions_url, load_config
+from foo_ai.config import (
+    ConfigError,
+    Provider,
+    completions_url,
+    known_providers,
+    load_config,
+    load_page_settings,
+    load_page_workspace,
+    merge_reasoning,
+    save_page_settings,
+    save_page_workspace,
+    user_config_path,
+    write_provider_settings,
+)
 from foo_ai.context import Context, transcript_chars
 from foo_ai.mcp import McpPool, advertise_name, render_tool_result
 from foo_ai.prompt import SYSTEM_PROMPT
@@ -483,6 +497,352 @@ args = [true]
         )
 
 
+class SettingsFileTests(unittest.TestCase):
+    """The file the desktop page writes: where it sits, what it overrides, how it is written."""
+
+    def test_the_path_follows_the_environment(self):
+        with tempfile.TemporaryDirectory() as folder:
+            with mock.patch.dict(os.environ, {"FOO_AI_CONFIG_DIR": folder}):
+                self.assertEqual(user_config_path(), Path(folder) / "foo-ai.toml")
+
+    def test_the_page_settings_override_the_launch_file(self):
+        with tempfile.TemporaryDirectory() as folder:
+            launch = Path(folder)
+            (launch / "foo-ai.toml").write_text(
+                'default_provider = "home"\n[providers.home]\nmodel = "from-launch"\n',
+                encoding="utf-8",
+                newline="\n",
+            )
+            settings = launch / "settings.toml"
+            settings.write_text(
+                'default_provider = "home"\n'
+                '[providers.home]\nbase_url = "http://127.0.0.1:9/v1"\nmodel = "from-page"\n',
+                encoding="utf-8",
+                newline="\n",
+            )
+            config = load_config(directory=launch, user_config=settings)
+        self.assertEqual(config.provider.name, "home")
+        self.assertEqual(config.provider.model, "from-page")
+        self.assertEqual(config.provider.base_url, "http://127.0.0.1:9/v1")
+
+    def test_a_provider_the_page_does_not_name_still_comes_from_the_launch_file(self):
+        with tempfile.TemporaryDirectory() as folder:
+            launch = Path(folder)
+            (launch / "foo-ai.toml").write_text(
+                '[providers.deepseek-flash_1]\nmodel = "from-launch"\n',
+                encoding="utf-8",
+                newline="\n",
+            )
+            settings = launch / "settings.toml"
+            settings.write_text(
+                '[providers.home]\nmodel = "from-page"\n', encoding="utf-8", newline="\n"
+            )
+            deepseek = load_config("deepseek-flash_1", directory=launch, user_config=settings)
+            home = load_config("home", directory=launch, user_config=settings)
+        self.assertEqual(deepseek.provider.model, "from-launch")
+        self.assertEqual(home.provider.model, "from-page")
+
+    def test_the_cli_does_not_read_the_page_settings(self):
+        with tempfile.TemporaryDirectory() as folder:
+            home = Path(folder)
+            page = home / "page-settings"
+            page.mkdir()
+            (page / "foo-ai.toml").write_text(
+                'default_provider = "deepseek-flash_1"\n'
+                '[providers.deepseek-flash_1]\nmodel = "from-page"\n',
+                encoding="utf-8",
+                newline="\n",
+            )
+            with mock.patch.dict(os.environ, {"FOO_AI_CONFIG_DIR": str(page)}):
+                config = load_config(directory=home)
+        self.assertEqual(config.provider.name, "home")
+        self.assertEqual(config.provider.model, "DeepSeek-V4.1-Flash-1017")
+
+    def test_a_missing_settings_file_changes_nothing(self):
+        with tempfile.TemporaryDirectory() as folder:
+            config = load_config(directory=Path(folder), user_config=Path(folder) / "nothing.toml")
+        self.assertEqual(config.provider.name, "home")
+        self.assertEqual(config.provider.model, "DeepSeek-V4.1-Flash-1017")
+
+    def test_the_settings_file_carries_no_mcp_servers_and_no_budget(self):
+        with tempfile.TemporaryDirectory() as folder:
+            settings = Path(folder) / "settings.toml"
+            settings.write_text(
+                'max_steps = 7\n[mcp.demo]\nenabled = true\ncommand = "python"\n',
+                encoding="utf-8",
+                newline="\n",
+            )
+            config = load_config(directory=Path(folder), user_config=settings)
+        self.assertEqual(config.mcp_servers, [])
+        self.assertEqual(config.max_steps, 200)
+
+    def test_a_broken_settings_file_names_the_file(self):
+        with tempfile.TemporaryDirectory() as folder:
+            settings = Path(folder) / "settings.toml"
+            settings.write_text("providers = 3\n", encoding="utf-8", newline="\n")
+            with self.assertRaises(ConfigError) as caught:
+                load_config(directory=Path(folder), user_config=settings)
+        self.assertIn(str(settings), str(caught.exception))
+        self.assertIn("providers must be a table", str(caught.exception))
+
+    def test_the_settings_file_names_the_providers_it_adds(self):
+        with tempfile.TemporaryDirectory() as folder:
+            settings = Path(folder) / "settings.toml"
+            settings.write_text('[providers.work]\nmodel = "m"\n', encoding="utf-8", newline="\n")
+            self.assertEqual(
+                known_providers(Path(folder), user_config=settings),
+                ["deepseek-flash_1", "home", "work"],
+            )
+
+    def test_writing_a_provider_round_trips(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "nested" / "foo-ai.toml"
+            write_provider_settings(
+                path,
+                "deepseek-flash_1",
+                base_url="https://api.deepseek.com/v1",
+                model="deepseek-flash",
+                context_window=128_000,
+                api_key="sk-test",
+            )
+            text = path.read_text(encoding="utf-8")
+            config = load_config(directory=Path(folder), user_config=path)
+        self.assertEqual(tomllib.loads(text)["default_provider"], "deepseek-flash_1")
+        self.assertEqual(config.provider.name, "deepseek-flash_1")
+        self.assertEqual(config.provider.base_url, "https://api.deepseek.com/v1")
+        self.assertEqual(config.provider.model, "deepseek-flash")
+        self.assertEqual(config.provider.context_window, 128_000)
+        self.assertEqual(config.provider.api_key, "sk-test")
+        self.assertNotIn("extra_body", tomllib.loads(text)["providers"]["deepseek-flash_1"])
+
+    def test_writing_home_records_the_thinking_flags_the_request_sends(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "foo-ai.toml"
+            write_provider_settings(
+                path,
+                "home",
+                base_url="http://100.109.56.33:8100/v1",
+                model="DeepSeek-V4.1-Flash-1017",
+                context_window=1_000_000,
+                extra_body={"chat_template_kwargs": {"reasoning_effort": "max", "thinking": True}},
+            )
+            saved = tomllib.loads(path.read_text(encoding="utf-8"))
+            write_provider_settings(
+                path,
+                "home",
+                base_url="http://100.109.56.33:8100/v1",
+                model="DeepSeek-V4.1-Flash-1017",
+                context_window=1_000_000,
+                extra_body={"chat_template_kwargs": {"reasoning_effort": "low", "thinking": False}},
+            )
+            kept = tomllib.loads(path.read_text(encoding="utf-8"))
+        self.assertEqual(
+            saved["providers"]["home"]["extra_body"],
+            {"chat_template_kwargs": {"reasoning_effort": "max", "thinking": True}},
+        )
+        self.assertEqual(kept["providers"]["home"]["extra_body"], saved["providers"]["home"]["extra_body"])
+
+    def test_merge_reasoning_edits_only_the_two_fields_the_sheet_shows(self):
+        body = {
+            "temperature": 0.2,
+            "chat_template_kwargs": {
+                "reasoning_effort": "max",
+                "thinking": True,
+                "enable_thinking": False,
+            },
+        }
+        merged = merge_reasoning(body, {"reasoning_effort": "low", "thinking": False})
+        self.assertEqual(
+            merged,
+            {
+                "temperature": 0.2,
+                "chat_template_kwargs": {
+                    "reasoning_effort": "low",
+                    "thinking": False,
+                    "enable_thinking": False,
+                },
+            },
+        )
+        # The caller's body is left as it was.
+        self.assertEqual(body["chat_template_kwargs"]["reasoning_effort"], "max")
+
+    def test_merge_reasoning_drops_a_blank_effort(self):
+        body = {"chat_template_kwargs": {"reasoning_effort": "max", "thinking": True}}
+        merged = merge_reasoning(body, {"reasoning_effort": "", "thinking": True})
+        self.assertEqual(merged, {"chat_template_kwargs": {"thinking": True}})
+        only_thinking = merge_reasoning({}, {"thinking": False})
+        self.assertEqual(only_thinking, {"chat_template_kwargs": {"thinking": False}})
+
+    def test_writing_the_edited_body_replaces_the_stored_one(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "foo-ai.toml"
+            path.write_text(
+                "[providers.home.extra_body]\n"
+                'stream_options = { include_usage = true }\n\n'
+                "[providers.home.extra_body.chat_template_kwargs]\n"
+                "thinking = true\n",
+                encoding="utf-8",
+                newline="\n",
+            )
+            write_provider_settings(
+                path,
+                "home",
+                base_url="http://127.0.0.1:9/v1",
+                model="m",
+                context_window=1000,
+                extra_body={
+                    "stream_options": {"include_usage": True},
+                    "chat_template_kwargs": {"reasoning_effort": "low", "thinking": False},
+                },
+                replace_extra_body=True,
+            )
+            saved = tomllib.loads(path.read_text(encoding="utf-8"))
+        self.assertEqual(
+            saved["providers"]["home"]["extra_body"],
+            {
+                "stream_options": {"include_usage": True},
+                "chat_template_kwargs": {"reasoning_effort": "low", "thinking": False},
+            },
+        )
+
+    def test_writing_keeps_the_other_tables_and_the_stored_key(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "foo-ai.toml"
+            path.write_text(
+                'default_provider = "home"\n\n'
+                '[providers.home]\nmodel = "kept"\napi_key = "kept-key"\n\n'
+                "[providers.home.extra_body.chat_template_kwargs]\nthinking = true\n",
+                encoding="utf-8",
+                newline="\n",
+            )
+            write_provider_settings(
+                path,
+                "home",
+                base_url="http://127.0.0.1:9/v1",
+                model="changed",
+                context_window=0,
+            )
+            kept = tomllib.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(kept["providers"]["home"]["api_key"], "kept-key")
+            self.assertEqual(
+                kept["providers"]["home"]["extra_body"],
+                {"chat_template_kwargs": {"thinking": True}},
+            )
+            write_provider_settings(
+                path,
+                "home",
+                base_url="http://127.0.0.1:9/v1",
+                model="changed",
+                context_window=0,
+                api_key="",
+            )
+            cleared = tomllib.loads(path.read_text(encoding="utf-8"))
+        self.assertEqual(cleared["default_provider"], "home")
+        self.assertEqual(cleared["providers"]["home"]["model"], "changed")
+        self.assertEqual(cleared["providers"]["home"]["api_key"], "")
+
+    def test_the_page_options_round_trip(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "foo-ai.toml"
+            save_page_settings(path, thinking=True, verbose=False, yes=True)
+            self.assertEqual(
+                load_page_settings(path),
+                {"thinking": True, "verbose": False, "yes": True},
+            )
+            write_provider_settings(
+                path,
+                "home",
+                base_url="http://127.0.0.1:9/v1",
+                model="m",
+                context_window=1,
+            )
+            kept = tomllib.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(kept["page"], {"thinking": True, "verbose": False, "yes": True})
+            self.assertEqual(kept["providers"]["home"]["model"], "m")
+            save_page_settings(path, thinking=False, verbose=True, yes=False)
+            self.assertEqual(
+                load_page_settings(path),
+                {"thinking": False, "verbose": True, "yes": False},
+            )
+            saved = tomllib.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(saved["providers"]["home"]["model"], "m")
+
+    def test_a_missing_settings_file_leaves_the_options_off(self):
+        with tempfile.TemporaryDirectory() as folder:
+            missing = Path(folder) / "nothing.toml"
+            self.assertEqual(
+                load_page_settings(missing),
+                {"thinking": False, "verbose": False, "yes": False},
+            )
+        self.assertEqual(load_page_settings(None)["thinking"], False)
+
+    def test_a_non_boolean_option_stays_off(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "foo-ai.toml"
+            path.write_text(
+                '[page]\nthinking = "yes"\nverbose = 1\nyes = true\n',
+                encoding="utf-8",
+                newline="\n",
+            )
+            self.assertEqual(
+                load_page_settings(path),
+                {"thinking": False, "verbose": False, "yes": True},
+            )
+
+    def test_a_page_that_is_not_a_table_names_the_file(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "foo-ai.toml"
+            path.write_text("page = 3\n", encoding="utf-8", newline="\n")
+            with self.assertRaises(ConfigError) as caught:
+                load_page_settings(path)
+        self.assertIn(str(path), str(caught.exception))
+        self.assertIn("page must be a table", str(caught.exception))
+
+    def test_the_page_workspace_round_trips_beside_the_providers(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "foo-ai.toml"
+            workspace = Path(folder) / "project"
+            workspace.mkdir()
+            self.assertIsNone(load_page_workspace(path))
+            save_page_workspace(path, workspace)
+            self.assertEqual(load_page_workspace(path), workspace)
+            write_provider_settings(
+                path,
+                "home",
+                base_url="http://127.0.0.1:9/v1",
+                model="m",
+                context_window=1,
+            )
+            save_page_settings(path, thinking=True, verbose=False, yes=True)
+            self.assertEqual(load_page_workspace(path), workspace)
+            kept = tomllib.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(Path(kept["workspace"]), workspace)
+            self.assertEqual(kept["default_provider"], "home")
+            self.assertEqual(kept["page"], {"thinking": True, "verbose": False, "yes": True})
+
+    def test_a_workspace_value_that_is_not_a_folder_name_reads_as_none(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "foo-ai.toml"
+            self.assertIsNone(load_page_workspace(None))
+            for text in ('workspace = "   "\n', "workspace = 7\n", 'workspace = ""\n'):
+                path.write_text(text, encoding="utf-8", newline="\n")
+                self.assertIsNone(load_page_workspace(path), text)
+
+    def test_a_quote_and_a_newline_in_a_value_round_trip(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "foo-ai.toml"
+            write_provider_settings(
+                path,
+                "home",
+                base_url='https://api.example.com/v1?q="x"',
+                model='line\n"two"',
+                context_window=1,
+            )
+            data = tomllib.loads(path.read_text(encoding="utf-8"))
+        self.assertEqual(data["providers"]["home"]["base_url"], 'https://api.example.com/v1?q="x"')
+        self.assertEqual(data["providers"]["home"]["model"], 'line\n"two"')
+
+
 class UsageTests(unittest.TestCase):
     def test_sample_lines(self):
         usage = parse_usage(
@@ -784,6 +1144,20 @@ class ToolTests(unittest.TestCase):
         self.assertEqual(cleared["todos"], [])
         self.assertEqual(cleared["counts"]["total"], 0)
         self.assertEqual(self.box.todos, [])
+        from foo_ai.tools import latest_todos
+
+        listed = json.dumps({"todos": [{"content": "ship", "status": "pending"}]})
+        self.assertEqual(
+            latest_todos(
+                [
+                    {"role": "tool", "name": "todo_write", "content": listed},
+                    {"role": "tool", "name": "todo_write", "content": "error: todos must be an array"},
+                ]
+            ),
+            [{"content": "ship", "status": "pending"}],
+        )
+        self.assertEqual(latest_todos([{"role": "tool", "name": "todo_write", "content": '{"todos": []}'}]), [])
+        self.assertIsNone(latest_todos([]))
 
     def test_ask_choices_and_fallback(self):
         from foo_ai.tools import ASK_DISMISSED, ASK_NO_USER
@@ -801,20 +1175,53 @@ class ToolTests(unittest.TestCase):
             ]
         }
         self.assertEqual(self.box.run("ask", payload), ASK_NO_USER)
+        self.assertFalse((self.workspace / ".foo-ai" / "decisions.json").exists())
         seen = []
 
         def asker(questions):
             seen.append(questions)
             return [{"id": "q1", "selected": ["requests", "httpx"]}]
 
+        dismissed = Toolbox(self.workspace, confirm=lambda command: True, asker=lambda questions: [])
+        self.assertEqual(dismissed.run("ask", payload), ASK_DISMISSED)
+        self.assertFalse((self.workspace / ".foo-ai" / "decisions.json").exists())
         box = Toolbox(self.workspace, confirm=lambda command: True, asker=asker)
-        self.assertEqual(box.run("ask", payload), "The user answered:\n- Library: requests")
+        answered = box.run("ask", payload)
+        self.assertTrue(answered.startswith("The user answered:\n- Library: requests\n\ndecision_id: dec-"))
+        decision_id = answered.split("decision_id: ", 1)[1]
         self.assertEqual(seen[0][0]["header"], "Library")
         self.assertEqual(seen[0][0]["question"], "Which library?")
         self.assertEqual(seen[0][0]["options"][0]["description"], "small")
         self.assertFalse(seen[0][0]["multiSelect"])
-        dismissed = Toolbox(self.workspace, confirm=lambda command: True, asker=lambda questions: [])
-        self.assertEqual(dismissed.run("ask", payload), ASK_DISMISSED)
+        self.assertEqual(box.run("ask", payload), (
+            f"Host reused accepted decision {decision_id} for the same ambiguity. "
+            "The user already chose: The user answered:\n- Library: requests. "
+            f"Continue with that decision; to reopen it, cite decision_id {decision_id} and supply new_evidence."
+        ))
+        self.assertEqual(len(seen), 1)
+        box.asker = lambda questions: [{"id": "q1", "selected": ["httpx"]}]
+        reopened = box.run("ask", {**payload, "decision_id": decision_id, "new_evidence": "httpx is installed"})
+        self.assertTrue(reopened.startswith("The user answered:\n- Library: httpx\n\ndecision_id: " + decision_id))
+        self.assertIn(
+            "unknown decision_id 'dec-nope'",
+            box.run("ask", {**payload, "decision_id": "dec-nope"}),
+        )
+        own = Toolbox(self.workspace, confirm=lambda command: True, asker=lambda questions: [
+            {"id": "q1", "selected": ["  use sqlalchemy  "]},
+        ])
+        custom = own.run(
+            "ask",
+            {
+                "questions": [
+                    {
+                        "header": "Library",
+                        "question": "Which other library?",
+                        "options": [{"label": "requests"}, {"label": "httpx"}],
+                    }
+                ]
+            },
+        )
+        self.assertTrue(custom.startswith("The user answered:\n- Library: use sqlalchemy\n\ndecision_id: "))
         self.assertEqual(box.run("ask", {}), "error: questions is required")
         self.assertEqual(
             box.run(
@@ -834,7 +1241,79 @@ class ToolTests(unittest.TestCase):
             ]
         }
         box.asker = lambda questions: [{"id": "q1", "selected": ["docs", "tests", "docs"]}]
-        self.assertEqual(box.run("ask", both), "The user answered:\n- Extras: docs, tests")
+        extras = box.run("ask", both)
+        self.assertTrue(extras.startswith("The user answered:\n- Extras: docs, tests\n\ndecision_id: dec-"))
+
+    def test_a_blank_decision_id_asks_instead_of_failing(self):
+        payload = {
+            "questions": [
+                {
+                    "header": "Library",
+                    "question": "Which library?",
+                    "options": [{"label": "requests"}, {"label": "httpx"}],
+                }
+            ]
+        }
+        seen = []
+
+        def asker(questions):
+            seen.append(questions)
+            return [
+                {"id": question["id"], "selected": [question["options"][0]["label"]]}
+                for question in questions
+            ]
+
+        box = Toolbox(self.workspace, confirm=lambda command: True, asker=asker)
+        answered = box.run("ask", {**payload, "decision_id": ""})
+        self.assertTrue(answered.startswith("The user answered:\n- Library: requests\n\ndecision_id: dec-"))
+        self.assertEqual(len(seen), 1)
+        decision_id = answered.split("decision_id: ", 1)[1]
+        self.assertTrue(
+            box.run("ask", {**payload, "decision_id": ""}).startswith(
+                f"Host reused accepted decision {decision_id} for the same ambiguity."
+            )
+        )
+        scope = {
+            "questions": [
+                {
+                    "header": "Scope",
+                    "question": "Which scope?",
+                    "options": [{"label": "one"}, {"label": "two"}],
+                }
+            ]
+        }
+        self.assertTrue(
+            box.run("ask", {**scope, "decision_id": "   "}).startswith("The user answered:\n- Scope: one")
+        )
+        self.assertEqual(len(seen), 2)
+        self.assertEqual(box.run("ask", {**payload, "decision_id": 7}), "error: decision_id must be a string")
+
+    def test_an_unwritable_decision_file_keeps_the_answer(self):
+        payload = {
+            "questions": [
+                {
+                    "header": "Library",
+                    "question": "Which library?",
+                    "options": [{"label": "requests"}, {"label": "httpx"}],
+                }
+            ]
+        }
+        store = self.workspace / ".foo-ai" / "decisions.json"
+        store.mkdir(parents=True)
+        box = Toolbox(
+            self.workspace,
+            confirm=lambda command: True,
+            asker=lambda questions: [{"id": "q1", "selected": ["requests"]}],
+        )
+        answered = box.run("ask", payload)
+        self.assertTrue(answered.startswith("The user answered:\n- Library: requests\n\ndecision_id: dec-"))
+        decision_id = answered.split("decision_id: ", 1)[1]
+        self.assertEqual(box.decisions.get(decision_id)["answer"], "The user answered:\n- Library: requests")
+        self.assertFalse((self.workspace / ".foo-ai" / "decisions.json.tmp").exists())
+        self.assertTrue(store.is_dir())
+        self.assertTrue(
+            box.run("ask", payload).startswith(f"Host reused accepted decision {decision_id} for the same ambiguity.")
+        )
 
 
 class SessionTests(unittest.TestCase):
@@ -874,6 +1353,10 @@ class SessionTests(unittest.TestCase):
         self.assertEqual(note, "Resumed .foo-ai/session.jsonl (3 messages).")
         self.assertEqual(reloaded.messages[-1]["content"], "error: interrupted before the tool result was saved")
         self.assertEqual(self.session.path.read_text(encoding="utf-8"), text)
+        reloaded.decisions.remember("dec-a", "dec-a", "The user answered:\n- Library: httpx")
+        again = Session(self.workspace)
+        again.load()
+        self.assertEqual(again.decisions.get("dec-a")["answer"], "The user answered:\n- Library: httpx")
         with mock.patch("foo_ai.session.time.strftime", return_value="20261123-140000"):
             cleared = reloaded.reset()
         self.assertEqual(cleared, "Conversation cleared. Archived .foo-ai/session-20261123-140000.jsonl.")
@@ -896,6 +1379,10 @@ class SessionTests(unittest.TestCase):
         self.assertEqual(note, "Session file was unreadable and was renamed to .foo-ai/session.jsonl.broken.")
         self.assertFalse(path.exists())
         self.assertIn("not json", (directory / "session.jsonl.broken").read_text(encoding="utf-8"))
+        (directory / "decisions.json").write_text('{"decisions": []}\n', encoding="utf-8")
+        path.write_text("not json\n", encoding="utf-8")
+        self.assertIn("unreadable", Session(self.workspace).load())
+        self.assertFalse((directory / "decisions.json").exists())
         path.write_text(
             json.dumps({"extra": 1, "content": "old", "role": "system"}) + "\n"
             + json.dumps({"content": "hi", "role": "user"}) + "\n",
@@ -989,7 +1476,7 @@ class AgentTests(unittest.TestCase):
         agent = Agent(
             provider=provider,
             session=session,
-            toolbox=Toolbox(workspace, confirm=lambda command: yes),
+            toolbox=Toolbox(workspace, confirm=lambda command: yes, decisions=session.decisions),
             client=client,
             sink=sink,
             max_steps=max_steps,
@@ -1121,7 +1608,94 @@ class AgentTests(unittest.TestCase):
         )
         agent.toolbox.asker = lambda questions: [{"id": "q1", "selected": ["httpx"]}]
         self.assertEqual(agent.ask("pick"), "Using httpx.")
-        self.assertEqual(session.messages[-2]["content"], "The user answered:\n- Library: httpx")
+        self.assertTrue(
+            session.messages[-2]["content"].startswith("The user answered:\n- Library: httpx\n\ndecision_id: dec-")
+        )
+
+    def test_dismiss_skips_tools_that_follow_and_keeps_those_before(self):
+        from foo_ai.tools import ASK_DISMISSED, ASK_SKIPPED
+
+        raw = json.dumps(
+            {
+                "questions": [
+                    {
+                        "header": "Library",
+                        "question": "Which library?",
+                        "options": [{"label": "requests"}, {"label": "httpx"}],
+                    }
+                ]
+            }
+        )
+        agent, session, sink, client, workspace = self._agent(
+            [
+                Completion(
+                    content="",
+                    reasoning_content="",
+                    tool_calls=[
+                        {
+                            "id": "call_0",
+                            "type": "function",
+                            "function": {
+                                "name": "write_file",
+                                "arguments": json.dumps({"path": "kept.txt", "content": "yes"}),
+                            },
+                        },
+                        {
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {"name": "ask", "arguments": raw},
+                        },
+                        {
+                            "id": "call_2",
+                            "type": "function",
+                            "function": {
+                                "name": "write_file",
+                                "arguments": json.dumps({"path": "skipped.txt", "content": "no"}),
+                            },
+                        },
+                    ],
+                ),
+                answer("should not run"),
+            ]
+        )
+        agent.toolbox.asker = lambda questions: []
+        self.assertEqual(agent.ask("pick"), ASK_DISMISSED)
+        self.assertEqual((workspace / "kept.txt").read_text(encoding="utf-8"), "yes")
+        self.assertFalse((workspace / "skipped.txt").exists())
+        self.assertEqual(session.messages[-1]["name"], "write_file")
+        self.assertEqual(session.messages[-1]["content"], ASK_SKIPPED)
+        self.assertEqual(len(client.rounds), 1)
+
+    def test_an_answered_ask_does_not_nudge_open_todos(self):
+        pending = json.dumps({"todos": [{"content": "ship", "status": "in_progress"}]})
+        raw = json.dumps(
+            {
+                "questions": [
+                    {
+                        "header": "Library",
+                        "question": "Which library?",
+                        "options": [{"label": "requests"}, {"label": "httpx"}],
+                    }
+                ]
+            }
+        )
+        agent, session, sink, client, workspace = self._agent(
+            [
+                tool_call("todo_write", pending),
+                tool_call("ask", raw),
+                answer("Stopping to check with you."),
+                answer("unused"),
+            ]
+        )
+        agent.toolbox.asker = lambda questions: [{"id": "q1", "selected": ["httpx"]}]
+        self.assertEqual(agent.ask("ship it"), "Stopping to check with you.")
+        notes = [
+            message
+            for message in session.messages
+            if message["role"] == "user" and str(message["content"]).startswith("[todo]")
+        ]
+        self.assertEqual(notes, [])
+        self.assertEqual(len(client.rounds), 1)
 
     def test_prompt_questions_and_hub_answer(self):
         from foo_ai.cli import make_asker, prompt_questions
@@ -1161,7 +1735,10 @@ class AgentTests(unittest.TestCase):
         self.assertIn("? Library\n", stdout.getvalue())
         self.assertIn("  1. requests - small\n", stdout.getvalue())
         self.assertIn("Enter a number from 1 to 2.", stdout.getvalue())
+        self.assertIn("or type your own answer:", stdout.getvalue())
         self.assertEqual(prompt_questions(questions[:1], io.StringIO(""), io.StringIO()), [])
+        own = prompt_questions(questions[:1], io.StringIO("use sqlalchemy\n"), io.StringIO())
+        self.assertEqual(own, [{"id": "q1", "selected": ["use sqlalchemy"]}])
         with mock.patch("sys.stdin.isatty", return_value=False):
             self.assertIsNone(make_asker()(questions))
 

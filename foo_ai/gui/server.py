@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import socket
 import sys
 import threading
@@ -35,8 +36,8 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
 from foo_ai import __version__
-from foo_ai.config import ConfigError
-from foo_ai.gui.hub import Hub
+from foo_ai.config import ConfigError, load_page_workspace, user_config_path
+from foo_ai.gui.hub import KEEP_KEY, Hub
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 0
@@ -64,6 +65,95 @@ def _whole(value: object) -> int:
     if isinstance(value, str) and value.strip().isdigit():
         return int(value.strip())
     return 0
+
+
+def _drive_roots() -> list[Path]:
+    """Every drive of this machine, for the picker at the top of one of them.
+
+    ``os.listdrives`` knows them on 3.12 and later. An older Windows reads the
+    same answer from one kernel call, so a mapped but disconnected drive is not
+    opened just to learn whether it is there.
+    """
+    if os.name != "nt":
+        return []
+    listed = getattr(os, "listdrives", None)
+    if listed is not None:
+        try:
+            return [Path(name) for name in listed()]
+        except OSError:
+            return []
+    try:
+        import ctypes
+
+        mask = ctypes.windll.kernel32.GetLogicalDrives()
+    except (AttributeError, OSError):
+        return []
+    return [Path(f"{chr(ord('A') + index)}:\\") for index in range(26) if mask >> index & 1]
+
+
+def browse_listing(raw: str, start: Path) -> dict:
+    """The folders under one directory, for the workspace picker.
+
+    An empty ``raw`` reads ``start``, the open workspace. A file names its own
+    folder, a path that is not there is refused, and a folder that cannot be
+    read says why. Only folders are listed, because a workspace is a folder, and
+    dot entries such as ``.git`` are left out. The top of a drive offers the
+    other drives, so the picker can leave the one it started on.
+    """
+    text = raw.strip()
+    try:
+        target = (start if text == "" else Path(text).expanduser()).resolve()
+    except OSError as exc:
+        return {"ok": False, "error": str(exc)}
+    if not target.exists():
+        return {"ok": False, "error": f"no such folder: {target}"}
+    if target.is_file():
+        target = target.parent
+    if not target.is_dir():
+        return {"ok": False, "error": f"not a folder: {target}"}
+    try:
+        children = [
+            child
+            for child in target.iterdir()
+            if child.is_dir() and not child.name.startswith(".")
+        ]
+    except OSError as exc:
+        return {"ok": False, "error": str(exc)}
+    entries = [{"name": child.name, "path": str(child)} for child in children]
+    parent = target.parent
+    top = parent == target
+    if top:
+        entries.extend(
+            {"name": root.drive or str(root), "path": str(root)}
+            for root in _drive_roots()
+            if root != target
+        )
+    entries.sort(key=lambda entry: entry["name"].lower())
+    return {
+        "ok": True,
+        "path": str(target),
+        "parent": None if top else str(parent),
+        "entries": entries,
+    }
+
+
+def resolve_workspace(flag: str | None, user_config: Path | None) -> Path:
+    """The folder the page opens: the flag, else the folder it opened last, else here.
+
+    ``--workspace`` names the folder for this run and is not written, the way
+    ``--provider`` names a provider for one run. The folder a switch in the page
+    wrote is what a launch without the flag comes back to. A saved folder that is
+    gone falls through to the current directory, so a deleted project does not
+    stop the page from starting.
+    """
+    if flag:
+        return Path(flag).expanduser().resolve()
+    saved = load_page_workspace(user_config)
+    if saved is not None:
+        saved = saved.resolve()
+        if saved.is_dir():
+            return saved
+    return Path.cwd().resolve()
 
 
 class GuiServer(ThreadingHTTPServer):
@@ -170,6 +260,9 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/events":
             after = _whole(parse_qs(url.query).get("after", ["0"])[0])
             return self._json(hub.events_after(after))
+        if path == "/api/browse":
+            wanted = parse_qs(url.query).get("path", [""])[0]
+            return self._json(browse_listing(wanted, hub.workspace))
         return self._json({"error": "not found"}, HTTPStatus.NOT_FOUND)
 
     def do_POST(self) -> None:
@@ -213,6 +306,17 @@ class Handler(BaseHTTPRequestHandler):
             )
         if path == "/api/provider":
             return self._json(hub.set_provider(_text(body.get("name"))))
+        if path == "/api/provider/save":
+            return self._json(
+                hub.save_provider(
+                    _text(body.get("name")),
+                    base_url=_text(body.get("base_url")),
+                    model=_text(body.get("model")),
+                    context_window=body.get("context_window"),
+                    api_key=body["api_key"] if "api_key" in body else KEEP_KEY,
+                    chat_template_kwargs=body.get("chat_template_kwargs"),
+                )
+            )
         if path == "/api/workspace":
             return self._json(hub.set_workspace(_text(body.get("path"))))
         return self._json({"error": "not found"}, HTTPStatus.NOT_FOUND)
@@ -226,6 +330,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--workspace", default=None, metavar="DIR")
     parser.add_argument("--provider", default=None, metavar="NAME")
+    parser.add_argument("--config", default=None, metavar="PATH",
+                        help="settings file the page reads last and writes (default: the user's config directory)")
     parser.add_argument("--max-steps", type=int, default=None, metavar="N")
     parser.add_argument("--show-thinking", action="store_true")
     parser.add_argument("--verbose", action="store_true")
@@ -269,7 +375,12 @@ def main(argv: list[str] | None = None) -> int:
     if args.read_timeout < 0:
         sys.stderr.write("read_timeout must be zero or a positive number of seconds\n")
         return 1
-    workspace = Path(args.workspace).expanduser().resolve() if args.workspace else Path.cwd().resolve()
+    user_config = Path(args.config).expanduser() if args.config else user_config_path()
+    try:
+        workspace = resolve_workspace(args.workspace, user_config)
+    except ConfigError as exc:
+        sys.stderr.write(f"{exc}\n")
+        return 1
     hub = Hub(
         workspace,
         provider=args.provider,
@@ -278,6 +389,7 @@ def main(argv: list[str] | None = None) -> int:
         verbose=args.verbose,
         thinking=args.show_thinking,
         read_timeout=None if args.read_timeout == 0 else args.read_timeout,
+        user_config=user_config,
     )
     try:
         hub.start()

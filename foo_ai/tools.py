@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import difflib
+import hashlib
 import json
 import locale
 import os
@@ -218,7 +219,10 @@ TOOL_SCHEMAS = [
                 "and you cannot settle it from the request, the code, or a sensible default. "
                 "Each question has a short header, the question text, 2 to 4 options, "
                 "and multiSelect when more than one option may apply. "
-                "Put any recommended option first. Do not use this for a decision with an obvious default."
+                "Put any recommended option first. The user may also type their own answer. "
+                "Do not use this for a decision with an obvious default. "
+                "The same ambiguity is asked only once: a later call returns the accepted decision. "
+                "To reopen it, pass that decision_id and new_evidence."
             ),
             "parameters": {
                 "type": "object",
@@ -260,7 +264,20 @@ TOOL_SCHEMAS = [
                             },
                             "required": ["header", "question", "options"],
                         },
-                    }
+                    },
+                    "decision_id": {
+                        "type": "string",
+                        "description": (
+                            "Required when reopening a previously accepted decision. "
+                            "Cite the decision_id from that answer."
+                        ),
+                    },
+                    "new_evidence": {
+                        "type": "string",
+                        "description": (
+                            "Required with decision_id when asking again after the user already accepted a choice."
+                        ),
+                    },
                 },
                 "required": ["questions"],
             },
@@ -302,6 +319,7 @@ ASK_DISMISSED = (
     'The user dismissed the question without choosing — read this as "don\'t decide for me, let\'s just talk." '
     "Do not pick an option, run a tool, or take any further action toward this; stop and wait for the user's next message."
 )
+ASK_SKIPPED = "error: skipped because the user dismissed the question"
 _TODO_STATUS = {"pending", "in_progress", "completed"}
 
 
@@ -373,10 +391,10 @@ def format_answers(questions: list[dict], answers: object) -> str:
     lines: list[str] = []
     answered = 0
     for question in questions:
-        allowed = [option["label"] for option in question["options"]]
         picks: list[str] = []
         for label in selected.get(question["id"], []):
-            if label in allowed and label not in picks:
+            label = " ".join(label.split())
+            if label and label not in picks:
                 picks.append(label)
         if not question["multiSelect"]:
             picks = picks[:1]
@@ -389,6 +407,179 @@ def format_answers(questions: list[dict], answers: object) -> str:
     if answered == 0:
         return ASK_DISMISSED
     return "The user answered:\n" + "\n".join(lines)
+
+
+def decision_id_for(questions: list[dict]) -> str:
+    """Stable id for one ambiguity: headers, question text, and option labels."""
+    digest = hashlib.sha256()
+    for question in questions:
+        digest.update(question["header"].strip().lower().encode())
+        digest.update(b"\0")
+        digest.update(question["question"].strip().lower().encode())
+        digest.update(b"\0")
+        for option in question["options"]:
+            digest.update(option["label"].strip().lower().encode())
+            digest.update(b"\0")
+    return "dec-" + digest.hexdigest()[:16]
+
+
+def reuse_cited(item: dict) -> str:
+    return (
+        f"Host reused accepted decision {item['id']}. The user already chose: {item['answer']}. "
+        "Continue with that decision unless you supply decision_id and new_evidence."
+    )
+
+
+def reuse_matched(item: dict) -> str:
+    return (
+        f"Host reused accepted decision {item['id']} for the same ambiguity. "
+        f"The user already chose: {item['answer']}. "
+        f"Continue with that decision; to reopen it, cite decision_id {item['id']} and supply new_evidence."
+    )
+
+
+class DecisionStore:
+    """Accepted ask answers, kept beside the transcript so a summary cannot drop them."""
+
+    def __init__(self, directory: Path):
+        self.directory = directory
+        self.path = directory / "decisions.json"
+        self.items: list[dict] = []
+
+    def load(self) -> None:
+        self.items = []
+        if not self.path.is_file():
+            return
+        try:
+            raw = json.loads(self.path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            return
+        rows = raw.get("decisions") if isinstance(raw, dict) else None
+        if not isinstance(rows, list):
+            return
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            ident = row.get("id")
+            key = row.get("key")
+            answer = row.get("answer")
+            if not isinstance(ident, str) or not isinstance(key, str) or not isinstance(answer, str):
+                continue
+            ident = ident.strip()
+            key = key.strip()
+            if ident and key and answer.strip():
+                self.items.append({"id": ident, "key": key, "answer": answer})
+
+    def save(self) -> None:
+        """Write the whole list through ``decisions.json.tmp``, then replace the file.
+
+        A write that fails removes its temporary file before the error leaves, so
+        the directory keeps no half-written copy.
+        """
+        self.directory.mkdir(parents=True, exist_ok=True)
+        temporary = self.directory / "decisions.json.tmp"
+        payload = {"decisions": self.items}
+        try:
+            with temporary.open("w", encoding="utf-8", newline="\n") as handle:
+                handle.write(json.dumps(payload, ensure_ascii=False, indent=2))
+                handle.write("\n")
+            temporary.replace(self.path)
+        except OSError:
+            try:
+                temporary.unlink()
+            except OSError:
+                pass
+            raise
+
+    def clear(self) -> None:
+        self.items = []
+        if self.path.exists():
+            self.path.unlink()
+        temporary = self.directory / "decisions.json.tmp"
+        if temporary.exists():
+            temporary.unlink()
+
+    def get(self, ident: str) -> dict | None:
+        for item in self.items:
+            if item["id"] == ident:
+                return item
+        return None
+
+    def match_key(self, key: str) -> dict | None:
+        for item in self.items:
+            if item["key"] == key:
+                return item
+        return None
+
+    def remember(self, ident: str, key: str, answer: str) -> bool:
+        """Keep one answer, then persist the list. ``False`` means the file was not written.
+
+        The user has already answered when this runs, so a failed write keeps the
+        answer for this session instead of losing it: the tool result still goes
+        back, and only the copy a restart reads is missing.
+        """
+        kept = [item for item in self.items if item["id"] != ident and item["key"] != key]
+        kept.append({"id": ident, "key": key, "answer": answer})
+        self.items = kept
+        try:
+            self.save()
+        except OSError:
+            return False
+        return True
+
+
+def _ask_reopen(args: dict) -> tuple[str, str, str]:
+    """Return ``(decision_id, new_evidence, error)``. ``error`` is empty when the fields are valid.
+
+    A blank ``decision_id`` reads as no id at all: a model that fills every
+    property of the schema sends ``""`` for an id it does not have, and that ask
+    still belongs to the user.
+    """
+    explicit = ""
+    if "decision_id" in args and args["decision_id"] is not None:
+        value = args["decision_id"]
+        if not isinstance(value, str):
+            return "", "", "error: decision_id must be a string"
+        explicit = value.strip()
+    evidence = ""
+    if "new_evidence" in args and args["new_evidence"] is not None:
+        value = args["new_evidence"]
+        if not isinstance(value, str):
+            return "", "", "error: new_evidence must be a string"
+        evidence = value.strip()
+    return explicit, evidence, ""
+
+
+def latest_todos(messages: list[dict]) -> list[dict] | None:
+    """The last successful ``todo_write`` list in a transcript, or ``None`` when there is none."""
+    found: list[dict] | None = None
+    for message in messages:
+        if message.get("role") != "tool" or message.get("name") != "todo_write":
+            continue
+        content = message.get("content")
+        if not isinstance(content, str) or content.startswith("error:"):
+            continue
+        try:
+            value = json.loads(content)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(value, dict) or not isinstance(value.get("todos"), list):
+            continue
+        items: list[dict] = []
+        ok = True
+        for item in value["todos"]:
+            if not isinstance(item, dict):
+                ok = False
+                break
+            text = item.get("content")
+            status = item.get("status")
+            if not isinstance(text, str) or status not in _TODO_STATUS:
+                ok = False
+                break
+            items.append({"content": text, "status": status})
+        if ok:
+            found = items
+    return found
 
 
 def _stop_process(proc: subprocess.Popen) -> None:
@@ -423,7 +614,7 @@ def _unified(old_lines: list[str], new_lines: list[str], posix_path: str) -> str
 
 
 class Toolbox:
-    def __init__(self, workspace: Path, confirm, mcp=None, skills=None, asker=None):
+    def __init__(self, workspace: Path, confirm, mcp=None, skills=None, asker=None, decisions=None):
         self.workspace = workspace.resolve()
         self.confirm = confirm
         self.mcp = mcp
@@ -431,6 +622,9 @@ class Toolbox:
         self.asker = asker
         self.skill_runner = None
         self.todos: list[dict] = []
+        self.decisions = decisions if decisions is not None else DecisionStore(self.workspace / ".foo-ai")
+        if decisions is None:
+            self.decisions.load()
 
     def clear_todos(self) -> None:
         self.todos = []
@@ -767,15 +961,39 @@ class Toolbox:
         args = parse_arguments(raw)
         if isinstance(args, str):
             return args
+        explicit, evidence, error = _ask_reopen(args)
+        if error:
+            return error
         questions, error = normalize_questions(args.get("questions"))
         if questions is None:
             return error
+        key = decision_id_for(questions)
+        if explicit:
+            found = self.decisions.get(explicit)
+            if found is not None and evidence == "":
+                return reuse_cited(found)
+            if found is None and self.decisions.items:
+                return (
+                    f"error: unknown decision_id {explicit!r}; cite the original accepted decision_id "
+                    "and include new_evidence to reopen it"
+                )
+        else:
+            found = self.decisions.match_key(key)
+            if found is not None:
+                return reuse_matched(found)
         if self.asker is None:
             return ASK_NO_USER
         answers = self.asker(questions)
         if answers is None:
             return ASK_NO_USER
-        return format_answers(questions, answers)
+        summary = format_answers(questions, answers)
+        if summary == ASK_DISMISSED:
+            return summary
+        stored_id = explicit or key
+        # A write that fails must not swallow the answer the user just gave, so
+        # the summary goes back either way; only the restart copy is missing.
+        self.decisions.remember(stored_id, key, summary)
+        return summary + "\n\ndecision_id: " + stored_id
 
 
 def _offset(value: object) -> int:

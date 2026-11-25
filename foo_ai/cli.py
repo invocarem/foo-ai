@@ -117,7 +117,14 @@ def main(argv: list[str] | None = None) -> int:
         agent = Agent(
             provider=config.provider,
             session=session,
-            toolbox=Toolbox(workspace, _confirmer(args.yes), pool, skills, asker=make_asker()),
+            toolbox=Toolbox(
+                workspace,
+                _confirmer(args.yes),
+                pool,
+                skills,
+                asker=make_asker(),
+                decisions=session.decisions,
+            ),
             client=Client(config.provider),
             sink=CliSink(args.show_thinking, args.verbose),
             max_steps=args.max_steps if args.max_steps is not None else config.max_steps,
@@ -171,13 +178,16 @@ def prompt_questions(questions: list[dict], stdin, stdout) -> list[dict]:
                 stdout.write("\n")
                 stdout.flush()
                 return []
-            picked, error = _parse_choice(line, count, question["multiSelect"])
+            picked, custom, error = _parse_choice(line, count, question["multiSelect"])
             if error:
                 stdout.write(error + "\n")
                 stdout.write(prompt)
                 stdout.flush()
                 continue
-            labels = [question["options"][number - 1]["label"] for number in picked]
+            if custom is not None:
+                labels = [custom]
+            else:
+                labels = [question["options"][number - 1]["label"] for number in picked]
             answers.append({"id": question["id"], "selected": labels})
             break
     return answers
@@ -185,8 +195,8 @@ def prompt_questions(questions: list[dict], stdin, stdout) -> list[dict]:
 
 def _choice_prompt(count: int, multi: bool) -> str:
     if multi:
-        return f"Choose any [1-{count}], comma-separated: "
-    return f"Choose one [1-{count}]: "
+        return f"Choose any [1-{count}], comma-separated, or type your own answer: "
+    return f"Choose one [1-{count}], or type your own answer: "
 
 
 def _choice_error(count: int, multi: bool) -> str:
@@ -195,25 +205,26 @@ def _choice_error(count: int, multi: bool) -> str:
     return f"Enter a number from 1 to {count}."
 
 
-def _parse_choice(line: str, count: int, multi: bool) -> tuple[list[int], str | None]:
+def _parse_choice(line: str, count: int, multi: bool) -> tuple[list[int], str | None, str | None]:
+    """Return ``(numbers, custom, error)``. A non-numeric line is the user's own answer."""
     text = line.strip()
     if text == "":
-        return [], None
+        return [], None, None
     parts = [part for part in re.split(r"[\s,]+", text) if part]
+    if not parts or any(not part.isdigit() for part in parts):
+        return [], text, None
     numbers: list[int] = []
     for part in parts:
-        if not part.isdigit():
-            return [], _choice_error(count, multi)
         number = int(part)
         if number < 1 or number > count:
-            return [], _choice_error(count, multi)
+            return [], None, _choice_error(count, multi)
         if number not in numbers:
             numbers.append(number)
     if not numbers:
-        return [], _choice_error(count, multi)
+        return [], None, _choice_error(count, multi)
     if not multi and len(numbers) != 1:
-        return [], f"Enter one number from 1 to {count}."
-    return numbers, None
+        return [], None, f"Enter one number from 1 to {count}."
+    return numbers, None, None
 
 
 def _confirmer(yes: bool):

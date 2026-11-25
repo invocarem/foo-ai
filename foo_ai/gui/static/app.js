@@ -32,11 +32,16 @@ const toastEl = $('toast');
 const busyEl = $('busy');
 const busyText = $('busy-text');
 const settingsLayer = $('settings');
-const settingsWorkspace = $('settings-workspace');
-const settingsThinking = $('settings-thinking');
-const settingsVerbose = $('settings-verbose');
-const settingsYes = $('settings-yes');
-const settingsSteps = $('settings-steps');
+const settingsFile = $('settings-file');
+const settingsProvider = $('settings-provider');
+const settingsBaseUrl = $('settings-base-url');
+const settingsModel = $('settings-model');
+const settingsWindow = $('settings-window');
+const settingsKey = $('settings-key');
+const settingsKeyClear = $('settings-key-clear');
+const settingsReasoning = $('settings-reasoning');
+const settingsEffort = $('settings-effort');
+const settingsThinkingParam = $('settings-thinking-param');
 
 const state = {
   seq: 0,
@@ -50,6 +55,8 @@ const state = {
   workspace: '',
   providers: [],
   providerName: '',
+  provider: null,
+  settingsFile: '',
   maxSteps: null,
   thinking: false,
   verbose: false,
@@ -191,10 +198,104 @@ function inline(text) {
   return out;
 }
 
-/* A small, safe subset: fences, headings, lists, inline code, bold, italics,
-   and http links. Everything is escaped before a tag is added, so a reply can
-   never inject markup. An unterminated fence streams as code, which is what a
-   half-written block looks like. */
+/* A pipe outside inline code. Pipes inside `code` and escaped \| do not
+   count, so a sentence that mentions a command is not a table row. */
+function hasPipe(line) {
+  let code = false;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (ch === '`') {
+      code = !code;
+      continue;
+    }
+    if (ch === '\\' && line[i + 1] === '|') {
+      i += 1;
+      continue;
+    }
+    if (ch === '|' && !code) return true;
+  }
+  return false;
+}
+
+/* Split one GFM row. Leading and trailing pipes are the borders, not cells.
+   A pipe inside `code` or written as \| stays in the cell. */
+function splitRow(line) {
+  let text = line.trim().replace(/\r$/, '');
+  if (text.startsWith('|')) text = text.slice(1);
+  if (text.endsWith('|')) text = text.slice(0, -1);
+  const cells = [];
+  let buf = '';
+  let code = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (ch === '`') {
+      code = !code;
+      buf += ch;
+      continue;
+    }
+    if (ch === '\\' && text[i + 1] === '|') {
+      buf += '|';
+      i += 1;
+      continue;
+    }
+    if (ch === '|' && !code) {
+      cells.push(buf.trim());
+      buf = '';
+      continue;
+    }
+    buf += ch;
+  }
+  cells.push(buf.trim());
+  return cells;
+}
+
+/* | --- | :---: | ---: | : at least three dashes, optional alignment colons. */
+function isSeparatorRow(line) {
+  if (!hasPipe(line)) return false;
+  const cells = splitRow(line);
+  return cells.length > 0 && cells.every((cell) => /^:?-{3,}:?$/.test(cell));
+}
+
+function columnAlign(cell) {
+  const left = cell.startsWith(':');
+  const right = cell.endsWith(':');
+  if (left && right) return 'center';
+  if (right) return 'right';
+  return '';
+}
+
+function tableCell(tag, text, align) {
+  const cls = align === 'center' ? ' class="c"' : align === 'right' ? ' class="r"' : '';
+  return `<${tag}${cls}>${inline(text)}</${tag}>`;
+}
+
+function renderTable(header, aligns, rows) {
+  const width = Math.max(
+    header.length,
+    aligns.length,
+    ...rows.map((row) => row.length),
+    1,
+  );
+  const head = [];
+  for (let col = 0; col < width; col++) {
+    head.push(tableCell('th', header[col] || '', aligns[col] || ''));
+  }
+  const body = rows.map((row) => {
+    const cells = [];
+    for (let col = 0; col < width; col++) {
+      cells.push(tableCell('td', row[col] || '', aligns[col] || ''));
+    }
+    return `<tr>${cells.join('')}</tr>`;
+  }).join('');
+  const bodyHtml = body ? `<tbody>${body}</tbody>` : '';
+  return `<div class="md-table"><table><thead><tr>${head.join('')}</tr></thead>${bodyHtml}</table></div>`;
+}
+
+/* A small, safe subset: fences, headings, lists, tables, inline code, bold,
+   italics, and http links. Everything is escaped before a tag is added, so a
+   reply can never inject markup. An unterminated fence streams as code, which
+   is what a half-written block looks like. A table needs its separator row
+   before it is drawn; until then the lines stay text. */
 function renderMarkdown(text) {
   const lines = escapeHtml(text).split('\n');
   const out = [];
@@ -218,7 +319,8 @@ function renderMarkdown(text) {
     fence = null;
   };
 
-  for (const raw of lines) {
+  for (let i = 0; i < lines.length; i++) {
+    const raw = lines[i];
     if (fence !== null) {
       if (/^\s*```/.test(raw)) flushFence();
       else fence.push(raw);
@@ -233,6 +335,24 @@ function renderMarkdown(text) {
     if (raw.trim() === '') {
       flushPara();
       flushList();
+      continue;
+    }
+    if (hasPipe(raw) && i + 1 < lines.length && isSeparatorRow(lines[i + 1])) {
+      flushPara();
+      flushList();
+      const header = splitRow(raw);
+      const aligns = splitRow(lines[i + 1]).map(columnAlign);
+      const rows = [];
+      i += 2;
+      while (i < lines.length && lines[i].trim() !== '' && hasPipe(lines[i]) && !/^\s*```/.test(lines[i])) {
+        /* A following table starts at its own header, so leave that line for
+           the next pass instead of swallowing it as a body row. */
+        if (i + 1 < lines.length && isSeparatorRow(lines[i + 1]) && !isSeparatorRow(lines[i])) break;
+        rows.push(splitRow(lines[i]));
+        i += 1;
+      }
+      out.push(renderTable(header, aligns, rows));
+      i -= 1;
       continue;
     }
     const heading = raw.match(/^#{1,6}\s+(.*)$/);
@@ -374,7 +494,7 @@ function addTool(name) {
   return tool;
 }
 
-function fillTool(name, text, full, chars) {
+function fillTool(name, text, chars) {
   let tool = state.tool;
   if (!tool || tool.filled) tool = addTool(name);
   tool.filled = true;
@@ -382,7 +502,6 @@ function fillTool(name, text, full, chars) {
   tool.chars.textContent = `${Number(chars || 0).toLocaleString()} chars`;
   tool.pre.textContent = text;
   tool.pre.hidden = false;
-  if (full) tool.details.open = true;
   autoScroll();
 }
 
@@ -428,7 +547,7 @@ function handle(event) {
       addTool(event.text || '');
       break;
     case 'tool_result':
-      fillTool(event.name || '', event.text || '', event.full === true, event.chars || 0);
+      fillTool(event.name || '', event.text || '', event.chars || 0);
       break;
     case 'status':
     case 'notice':
@@ -533,7 +652,7 @@ function hideConfirm() {
 
 /* The ask tool stops the request until this popup is answered. A pick is
    optional: an empty answer is the same as Dismiss, and both tell the model to
-   decide nothing and wait. */
+   decide nothing and wait. A typed answer is the user's own choice. */
 function showAsk(questions) {
   state.questions = Array.isArray(questions) ? questions : [];
   if (state.questions.length === 0) {
@@ -590,7 +709,19 @@ function showAsk(questions) {
       options.append(label);
     }
 
-    block.append(head, prompt, options);
+    const custom = document.createElement('label');
+    custom.className = 'ask-custom';
+    const customLabel = document.createElement('span');
+    customLabel.textContent = 'Or type your own answer';
+    const customInput = document.createElement('input');
+    customInput.type = 'text';
+    customInput.className = 'ask-custom-input';
+    customInput.name = `ask-custom-${id}`;
+    customInput.autocomplete = 'off';
+    customInput.spellcheck = false;
+    custom.append(customLabel, customInput);
+
+    block.append(head, prompt, options, custom);
     askBody.append(block);
   });
   askBar.hidden = false;
@@ -648,7 +779,12 @@ async function submitAsk(dismiss) {
   if (!dismiss) {
     state.questions.forEach((question, index) => {
       const id = question.id || `q${index + 1}`;
-      const picked = [...askBody.querySelectorAll(`input[name="ask-${id}"]:checked`)].map((input) => input.value);
+      let picked = [...askBody.querySelectorAll(`input[name="ask-${id}"]:checked`)].map((input) => input.value);
+      const custom = askBody.querySelector(`input[name="ask-custom-${id}"]`);
+      const typed = custom ? custom.value.trim() : '';
+      if (typed) {
+        picked = question.multiSelect === true ? [...picked, typed] : [typed];
+      }
       answers.push({ id, selected: picked });
     });
   }
@@ -716,6 +852,21 @@ async function stop() {
   pollNow();
 }
 
+/* The desktop window's menu item. The page itself starts a new conversation
+   with /reset in the composer, so this posts the reset directly and never
+   overwrites a draft the composer is holding. */
+async function resetConversation() {
+  try {
+    const result = await postJson('/api/reset', {});
+    if (!result.ok) throw new Error(result.error || 'the conversation was not reset');
+    clearTranscript();
+    toast(result.note || 'Conversation cleared.', 'ok');
+  } catch (error) {
+    toast(String(error.message || error), 'bad');
+  }
+  pollNow();
+}
+
 async function answer(approve) {
   hideConfirm();
   try {
@@ -744,11 +895,16 @@ async function changeProvider(name) {
 }
 
 async function changeWorkspace(path) {
-  if (!path || path === state.workspace) return;
+  if (!path) return;
+  if (path === state.workspace) {
+    toast('That folder is already open.', 'ok');
+    return;
+  }
   setBusy(true, 'reading the workspace…');
   try {
     const result = await postJson('/api/workspace', { path });
     if (!result.ok) throw new Error(result.error || 'the workspace was refused');
+    hideWorkspacePicker();
     clearTranscript();
     await loadState();
     await loadHistory();
@@ -760,7 +916,104 @@ async function changeWorkspace(path) {
   }
 }
 
+/* ------------------------------------------------------- workspace picker */
+
+/* One folder walker under the Open row. It only fills the field: Open commits
+   it, so a mis-click in the list cannot move the session to another folder. */
+function hideWorkspacePicker() {
+  const picker = $('workspace-picker');
+  picker.hidden = true;
+  picker.textContent = '';
+  $('workspace-browse').setAttribute('aria-expanded', 'false');
+}
+
+async function browseWorkspace(path) {
+  try {
+    const query = path ? `?${new URLSearchParams({ path })}` : '';
+    const listing = await fetchJson(`/api/browse${query}`);
+    if (!listing.ok) throw new Error(listing.error || 'the folder could not be read');
+    renderWorkspacePicker(listing);
+  } catch (error) {
+    toast(String(error.message || error), 'bad');
+  }
+}
+
+/* The head names the folder it lists. A long path keeps its tail, because the
+   last folder is what tells two listings apart, and the pane is narrow. */
+function pathLabel(path, limit = 34) {
+  return path.length <= limit ? path : '…' + path.slice(1 - limit);
+}
+
+function renderWorkspacePicker(listing) {
+  const picker = $('workspace-picker');
+  picker.textContent = '';
+  const head = document.createElement('div');
+  head.className = 'picker-head';
+  if (listing.parent) {
+    const up = document.createElement('button');
+    up.type = 'button';
+    up.className = 'icon';
+    up.dataset.dir = listing.parent;
+    up.title = 'Up one folder';
+    up.setAttribute('aria-label', 'Up one folder');
+    up.innerHTML = '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 12V4M4 8l4-4 4 4"/></svg>';
+    head.append(up);
+  }
+  const where = document.createElement('span');
+  where.className = 'where';
+  where.textContent = pathLabel(listing.path);
+  where.title = listing.path;
+  head.append(where);
+
+  const list = document.createElement('div');
+  list.className = 'picker-list';
+  const entries = Array.isArray(listing.entries) ? listing.entries : [];
+  if (entries.length === 0) {
+    const empty = document.createElement('div');
+    empty.className = 'picker-empty';
+    empty.textContent = 'No folders here.';
+    list.append(empty);
+  }
+  for (const entry of entries) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'picker-entry';
+    button.dataset.dir = entry.path;
+    button.title = entry.path;
+    const kind = document.createElement('span');
+    kind.className = 'kind';
+    kind.textContent = '\u25b8';
+    const name = document.createElement('span');
+    name.className = 'name';
+    name.textContent = `${entry.name}/`;
+    button.append(kind, name);
+    list.append(button);
+  }
+
+  const foot = document.createElement('div');
+  foot.className = 'picker-foot';
+  const use = document.createElement('button');
+  use.type = 'button';
+  use.className = 'ghost';
+  use.dataset.use = listing.path;
+  use.textContent = 'Use this folder';
+  foot.append(use);
+
+  picker.append(head, list, foot);
+  picker.hidden = false;
+  $('workspace-browse').setAttribute('aria-expanded', 'true');
+}
+
 /* ------------------------------------------------------------------ state */
+
+function folderName(path) {
+  const trimmed = String(path || '').replace(/[\\/]+$/, '');
+  /* A root is all separator: "/" trims to nothing, and the head still has to
+     name it, so the path itself is the name there. */
+  if (!trimmed) return String(path || '');
+  const cut = Math.max(trimmed.lastIndexOf('/'), trimmed.lastIndexOf('\\'));
+  return cut === -1 ? trimmed : trimmed.slice(cut + 1);
+}
 
 function fact(rows, label, value, title) {
   const row = document.createElement('div');
@@ -777,7 +1030,9 @@ function fact(rows, label, value, title) {
 function applyState(data) {
   state.workspace = data.workspace || '';
   state.providers = data.providers || [];
+  state.provider = data.provider || null;
   state.providerName = data.provider ? data.provider.name : '';
+  state.settingsFile = data.settings_file || '';
   state.maxSteps = data.max_steps;
   state.skills = (data.skills || []).map((skill) => skill.name);
   state.thinking = data.thinking === true;
@@ -789,31 +1044,28 @@ function applyState(data) {
   $('show-thinking').checked = state.thinking;
   $('verbose').checked = state.verbose;
   $('auto-approve').checked = state.yes;
-  settingsThinking.checked = state.thinking;
-  settingsVerbose.checked = state.verbose;
-  settingsYes.checked = state.yes;
-  settingsWorkspace.value = state.workspace;
-  settingsSteps.textContent = `step budget ${state.maxSteps === null ? '–' : state.maxSteps}`;
+  if (settingsLayer.hidden) fillProviderForm();
+
+  const pathInput = $('workspace-path');
+  if (document.activeElement !== pathInput) pathInput.value = state.workspace;
 
   const where = $('where');
   where.textContent = '';
   const folder = document.createElement('span');
   folder.className = 'mono';
-  folder.textContent = state.workspace || 'no workspace';
+  folder.textContent = folderName(state.workspace) || 'no workspace';
+  if (state.workspace) folder.title = state.workspace;
   where.append(folder);
   if (data.provider) {
     where.append(document.createTextNode(` · ${data.provider.name} · ${data.provider.model}`));
   }
-
-  const workspaceFacts = $('workspace-facts');
-  workspaceFacts.textContent = '';
-  fact(workspaceFacts, 'folder', state.workspace || '–', state.workspace);
-  fact(workspaceFacts, 'steps', String(state.maxSteps === null ? '–' : state.maxSteps));
+  where.title = [state.workspace, data.provider && data.provider.name, data.provider && data.provider.model]
+    .filter(Boolean)
+    .join(' · ');
 
   const providerFacts = $('provider-facts');
   providerFacts.textContent = '';
   if (data.provider) {
-    fact(providerFacts, 'model', data.provider.model, data.provider.model);
     fact(providerFacts, 'window', String(data.provider.context_window), 'tokens');
     fact(providerFacts, 'url', data.provider.base_url, data.provider.base_url);
   }
@@ -863,6 +1115,7 @@ function applyState(data) {
   sessionFacts.textContent = '';
   fact(sessionFacts, 'file', data.session.file);
   fact(sessionFacts, 'messages', String(data.session.messages));
+  fact(sessionFacts, 'steps', String(state.maxSteps === null ? '–' : state.maxSteps));
   $('session-hint').textContent = data.note ? 'resumed' : '';
 
   const mcpPane = $('mcp-pane');
@@ -921,7 +1174,7 @@ async function loadHistory() {
       state.block = null;
     } else if (item.role === 'tool') {
       addTool(item.name || 'tool');
-      fillTool(item.name || 'tool', item.text || '', false, (item.text || '').length);
+      fillTool(item.name || 'tool', item.text || '', (item.text || '').length);
     }
   }
   state.block = null;
@@ -932,56 +1185,83 @@ async function loadHistory() {
 
 /* -------------------------------------------------------------- listeners */
 
-function toggleLeft() {
+/* A pane collapses by giving its grid column no width, so the stage keeps the
+   room and the other pane stays where it is. The button reports the state and
+   dims while its pane is off. */
+function togglePane(side) {
   const body = $('body');
-  body.classList.toggle('left-off');
-  $('toggle-left').setAttribute('aria-pressed', String(!body.classList.contains('left-off')));
+  const off = body.classList.toggle(`${side}-off`);
+  $(`toggle-${side}`).setAttribute('aria-pressed', String(!off));
 }
 
-function toggleRight() {
-  const body = $('body');
-  body.classList.toggle('right-off');
-  $('toggle-right').setAttribute('aria-pressed', String(!body.classList.contains('right-off')));
+/* The sheet shows the provider the page is on; Save writes it to the settings
+   file and switches to it. The key is write-only: the page never reads it.
+   The local reasoning block is shown only for a provider that sends one, so a
+   cloud provider has no fields for a body it never carries. */
+function reasoningBlock() {
+  const provider = state.provider;
+  const block = provider && provider.chat_template_kwargs;
+  return block && typeof block === 'object' ? block : null;
+}
+
+function fillProviderForm() {
+  const provider = state.provider;
+  settingsFile.textContent = state.settingsFile || '–';
+  settingsFile.title = state.settingsFile || '';
+  settingsProvider.value = provider ? provider.name : '';
+  settingsBaseUrl.value = provider ? provider.base_url : '';
+  settingsModel.value = provider ? provider.model : '';
+  settingsWindow.value = provider ? String(provider.context_window) : '';
+  settingsKey.value = '';
+  settingsKeyClear.checked = false;
+  settingsKey.placeholder = provider && provider.api_key_set
+    ? 'set · leave blank to keep it'
+    : 'no key';
+  const block = reasoningBlock();
+  settingsReasoning.hidden = block === null;
+  settingsEffort.value = block && typeof block.reasoning_effort === 'string'
+    ? block.reasoning_effort
+    : '';
+  settingsThinkingParam.checked = block !== null && block.thinking === true;
 }
 
 function openSettings() {
-  settingsWorkspace.value = state.workspace;
-  settingsThinking.checked = state.thinking;
-  settingsVerbose.checked = state.verbose;
-  settingsYes.checked = state.yes;
-  settingsSteps.textContent = `step budget ${state.maxSteps === null ? '–' : state.maxSteps}`;
+  fillProviderForm();
   settingsLayer.hidden = false;
-  settingsWorkspace.focus();
-  settingsWorkspace.select();
+  settingsBaseUrl.focus();
+  settingsBaseUrl.select();
 }
 
 function closeSettings() {
   settingsLayer.hidden = true;
 }
 
-async function applySettings(event) {
-  event.preventDefault();
-  closeSettings();
-  const wanted = settingsWorkspace.value.trim();
-  setBusy(true, 'applying…');
+async function saveProviderSettings() {
+  if (!state.providerName) {
+    toast('No provider to save.', 'bad');
+    return;
+  }
+  const body = {
+    name: state.providerName,
+    base_url: settingsBaseUrl.value.trim(),
+    model: settingsModel.value.trim(),
+    context_window: settingsWindow.value.trim(),
+  };
+  if (!settingsReasoning.hidden) {
+    body.chat_template_kwargs = {
+      reasoning_effort: settingsEffort.value.trim(),
+      thinking: settingsThinkingParam.checked,
+    };
+  }
+  if (settingsKeyClear.checked) body.api_key = '';
+  else if (settingsKey.value !== '') body.api_key = settingsKey.value;
+  setBusy(true, 'saving the provider…');
   try {
-    const saved = await postJson('/api/settings', {
-      thinking: settingsThinking.checked,
-      verbose: settingsVerbose.checked,
-      yes: settingsYes.checked,
-    });
-    if (!saved.ok) throw new Error(saved.error || 'the settings were refused');
-    state.thinking = saved.thinking === true;
-    state.verbose = saved.verbose === true;
-    state.yes = saved.yes === true;
-    if (wanted && wanted !== state.workspace) {
-      const moved = await postJson('/api/workspace', { path: wanted });
-      if (!moved.ok) throw new Error(moved.error || 'the workspace was refused');
-      clearTranscript();
-      await loadHistory();
-    }
+    const saved = await postJson('/api/provider/save', body);
+    if (!saved.ok) throw new Error(saved.error || 'the provider was refused');
     await loadState();
-    toast('Settings applied.', 'ok');
+    closeSettings();
+    toast(`Provider ${saved.provider.name} saved.`, 'ok');
   } catch (error) {
     toast(String(error.message || error), 'bad');
   } finally {
@@ -1019,10 +1299,6 @@ function wire() {
   });
 
   $('stop').addEventListener('click', stop);
-  $('reset').addEventListener('click', () => {
-    promptEl.value = '/reset';
-    send();
-  });
   $('confirm-allow').addEventListener('click', () => answer(true));
   $('confirm-deny').addEventListener('click', () => answer(false));
   $('ask-form').addEventListener('submit', (event) => {
@@ -1033,8 +1309,8 @@ function wire() {
   $('ask-close').addEventListener('click', () => submitAsk(true));
   $('ask-scrim').addEventListener('click', () => submitAsk(true));
 
-  $('toggle-left').addEventListener('click', toggleLeft);
-  $('toggle-right').addEventListener('click', toggleRight);
+  $('toggle-left').addEventListener('click', () => togglePane('left'));
+  $('toggle-right').addEventListener('click', () => togglePane('right'));
 
   $('show-thinking').addEventListener('change', (event) => toggleSetting('thinking', event.target.checked));
   $('verbose').addEventListener('change', (event) => toggleSetting('verbose', event.target.checked));
@@ -1047,11 +1323,40 @@ function wire() {
     changeWorkspace($('workspace-path').value.trim());
   });
 
+  $('workspace-browse').addEventListener('click', () => {
+    if (!$('workspace-picker').hidden) {
+      hideWorkspacePicker();
+      return;
+    }
+    browseWorkspace($('workspace-path').value.trim() || null);
+  });
+
+  $('workspace-picker').addEventListener('click', (event) => {
+    const folder = event.target.closest('[data-dir]');
+    const use = event.target.closest('[data-use]');
+    if (folder) browseWorkspace(folder.dataset.dir);
+    else if (use) {
+      $('workspace-path').value = use.dataset.use;
+      hideWorkspacePicker();
+      $('workspace-path').focus();
+    }
+  });
+
   $('settings-open').addEventListener('click', openSettings);
   $('settings-close').addEventListener('click', closeSettings);
   $('settings-cancel').addEventListener('click', closeSettings);
   $('settings-scrim').addEventListener('click', closeSettings);
-  $('settings-form').addEventListener('submit', applySettings);
+  $('settings-form').addEventListener('submit', (event) => event.preventDefault());
+  $('settings-provider-save').addEventListener('click', saveProviderSettings);
+  /* Enter in a provider field saves that provider. */
+  for (const field of [settingsBaseUrl, settingsModel, settingsWindow, settingsKey, settingsEffort]) {
+    field.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter' && !event.isComposing) {
+        event.preventDefault();
+        saveProviderSettings();
+      }
+    });
+  }
 
   transcript.addEventListener('scroll', () => {
     const slack = transcript.scrollHeight - transcript.scrollTop - transcript.clientHeight;
@@ -1064,6 +1369,7 @@ function wire() {
     if (event.key === 'Escape') {
       if (!askBar.hidden) submitAsk(true);
       else if (!settingsLayer.hidden) closeSettings();
+      else if (!$('workspace-picker').hidden) hideWorkspacePicker();
       return;
     }
     if (typing) return;
@@ -1072,20 +1378,15 @@ function wire() {
       openSettings();
       return;
     }
-    if (event.key === '[') toggleLeft();
-    if (event.key === ']') toggleRight();
+    if (event.key === '[') togglePane('left');
+    if (event.key === ']') togglePane('right');
   });
 
   /* The desktop shell's menu reaches the page through the preload bridge. */
   const desktop = window.fooAiDesktop;
   if (desktop) {
     if (typeof desktop.onSettings === 'function') desktop.onSettings(openSettings);
-    if (typeof desktop.onReset === 'function') {
-      desktop.onReset(() => {
-        promptEl.value = '/reset';
-        send();
-      });
-    }
+    if (typeof desktop.onReset === 'function') desktop.onReset(resetConversation);
     if (typeof desktop.onWorkspace === 'function') {
       desktop.onWorkspace((directory) => changeWorkspace(directory));
     }
