@@ -7,11 +7,13 @@
   "author": "Foo AI",
   "scripts": {
     "start": "electron .",
-    "dist": "electron-builder --win nsis"
+    "dist": "electron-builder",
+    "dist:win": "electron-builder --win nsis",
+    "dist:linux": "electron-builder --linux AppImage"
   },
   "devDependencies": {
     "electron": "45.3.4",
-    "electron-builder": "26.18.0"
+    "electron-builder": "^26.18.0"
   },
   "build": {
     "appId": "io.foo-ai.desktop",
@@ -31,7 +33,10 @@
       {
         "from": "../foo_ai",
         "to": "foo-ai/foo_ai",
-        "filter": ["**/*", "!**/__pycache__/**"]
+        "filter": [
+          "**/*",
+          "!**/__pycache__/**"
+        ]
       },
       {
         "from": "../pyproject.toml",
@@ -43,9 +48,18 @@
       }
     ],
     "win": {
-      "target": ["nsis"],
+      "target": [
+        "nsis"
+      ],
       "icon": "build/icon.ico",
       "signExecutable": false
+    },
+    "linux": {
+      "target": [
+        "AppImage"
+      ],
+      "icon": "build/icon.png",
+      "category": "Development"
     },
     "nsis": {
       "oneClick": false,

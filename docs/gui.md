@@ -191,8 +191,9 @@ npm install
 npm start
 ```
 
-`npm run dist` builds a Windows installer with `electron-builder`; the build
-copies `foo_ai/` beside the executable. `desktop/node_modules` and
+`npm run dist` builds for the machine you are on: an AppImage on Linux, an NSIS
+installer on Windows. `npm run dist:win` still builds that Windows installer.
+The build copies `foo_ai/` beside the executable. `desktop/node_modules` and
 `desktop/release` are not committed.
 
 The app icon is `desktop/build/icon.svg`: the prompt chevron and the cursor from
