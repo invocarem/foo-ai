@@ -23,6 +23,14 @@ const TITLE_BAR = '#141a26';
 const WINDOW_BG = '#0b0e14';
 const ANNOUNCE = 'foo-ai-desktop:';
 
+/* The window and taskbar icon from ``build/``: the ICO is what Windows wants,
+   the PNG is the same artwork for the other platforms. */
+function windowIcon() {
+  const name = process.platform === 'win32' ? 'icon.ico' : 'icon.png';
+  const file = path.join(__dirname, 'build', name);
+  return fs.existsSync(file) ? file : undefined;
+}
+
 let win = null;
 let server = null;
 let pageReady = false;
@@ -297,6 +305,7 @@ function createWindow(port) {
     show: false,
     backgroundColor: WINDOW_BG,
     title: 'Foo AI',
+    icon: windowIcon(),
     autoHideMenuBar: true,
     titleBarStyle: process.platform === 'darwin' ? 'hiddenInset' : 'hidden',
     titleBarOverlay: process.platform === 'darwin'

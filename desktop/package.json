@@ -23,7 +23,9 @@
     "files": [
       "main.js",
       "preload.js",
-      "package.json"
+      "package.json",
+      "build/icon.ico",
+      "build/icon.png"
     ],
     "extraResources": [
       {
@@ -42,7 +44,8 @@
     ],
     "win": {
       "target": ["nsis"],
-      "signAndEditExecutable": false
+      "icon": "build/icon.ico",
+      "signExecutable": false
     },
     "nsis": {
       "oneClick": false,

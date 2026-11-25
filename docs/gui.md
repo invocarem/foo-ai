@@ -195,6 +195,20 @@ npm start
 copies `foo_ai/` beside the executable. `desktop/node_modules` and
 `desktop/release` are not committed.
 
+The app icon is `desktop/build/icon.svg`: the prompt chevron and the cursor from
+the page's favicon, in the page's blue-to-violet gradient on the window's dark
+plate. The window hands the ICO to Electron, and the installer build embeds it
+in `FooAI.exe`, in the installer, and in its shortcuts. `signExecutable: false`
+skips the signature only; the icon and the version fields are still written.
+`icon.png` (512×512) and a multi-size `icon.ico` are rendered from the SVG and
+committed with it, so a build needs no image tool; changing the drawing means
+re-rendering both with ImageMagick:
+
+```sh
+magick -background none desktop/build/icon.svg -resize 512x512 PNG32:desktop/build/icon.png
+magick desktop/build/icon.png -define icon:auto-resize=256,128,64,48,32,24,16 desktop/build/icon.ico
+```
+
 | Variable | Effect |
 | --- | --- |
 | `FOO_AI_PYTHON` | Interpreter to start. Otherwise the repository's `.venv`, otherwise `python`. |
