@@ -272,10 +272,44 @@ npm run dist
 
 # Build the Windows NSIS installer.
 npm run dist:win
+
+# Build the Linux AppImage.
+npm run dist:linux
 ```
 
 The build copies `foo_ai/` beside the executable. `desktop/node_modules` and
 `desktop/release` are not committed.
+
+On Linux, Electron's user-namespace sandbox is often blocked by AppArmor
+(`kernel.apparmor_restrict_unprivileged_userns = 1`). `npm start` then refuses
+to open and exits with `SIGTRAP` until `chrome-sandbox` is owned by root and
+mode `4755`. From `desktop/`:
+
+```sh
+sudo chown root:root node_modules/electron/dist/chrome-sandbox
+sudo chmod 4755 node_modules/electron/dist/chrome-sandbox
+npm start
+```
+
+`npm install` replaces that file, so the `chown` and `chmod` have to be run
+again after each install.
+
+`npm run dist` and `npm run dist:linux` write
+`release/Foo AI-0.1.0.AppImage`. The image needs FUSE 2 (`libfuse.so.2`):
+`libfuse2t64` on current Ubuntu, `libfuse2` on older releases. The
+`chrome-sandbox` inside the image stays owned by the user, so start it with
+`--no-sandbox`:
+
+```sh
+sudo apt install libfuse2t64
+./"Foo AI-0.1.0.AppImage" --no-sandbox
+```
+
+When `libfuse.so.2` is absent, the same file extracts itself and runs:
+
+```sh
+./"Foo AI-0.1.0.AppImage" --appimage-extract-and-run --no-sandbox
+```
 
 The app icon is `desktop/build/icon.svg`: the page's prompt mark, the name's F
 and the prompt's underscore in two cells, in the page's blue-to-violet gradient

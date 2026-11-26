@@ -65,7 +65,7 @@ npm install
 npm start
 ```
 
-Node is needed for the window only; `python -m foo_ai.gui` runs without it. See [docs/gui.md](docs/gui.md) for the API, the events, the guards, and the window's menu.
+Node is needed for the window only; `python -m foo_ai.gui` runs without it. On Linux, AppArmor usually blocks the sandbox Electron expects, and the AppImage also needs FUSE 2. See [docs/gui.md](docs/gui.md) for those steps, and for the API, the events, the guards, and the window's menu.
 
 ## Tests
 
