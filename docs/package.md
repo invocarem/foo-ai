@@ -29,6 +29,8 @@ foo_ai/gui/__init__.py  # the desktop page: the console script target
 foo_ai/gui/__main__.py  # python -m foo_ai.gui
 foo_ai/gui/server.py    # loopback HTTP server and the JSON API
 foo_ai/gui/hub.py       # the agent, its event log, approvals, and cancel
+foo_ai/gui/notify.py    # the ntfy.sh message
+foo_ai/gui/words.py     # the words a new ntfy topic is built from
 foo_ai/gui/static/      # index.html, styles.css, app.js, favicon.svg
 desktop/                # Electron shell around the page
 ```

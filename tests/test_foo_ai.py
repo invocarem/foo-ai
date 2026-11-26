@@ -29,9 +29,11 @@ from foo_ai.config import (
     completions_url,
     known_providers,
     load_config,
+    load_notify_settings,
     load_page_settings,
     load_page_workspace,
     merge_reasoning,
+    save_notify_settings,
     save_page_settings,
     save_page_workspace,
     user_config_path,
@@ -766,6 +768,41 @@ class SettingsFileTests(unittest.TestCase):
             )
             saved = tomllib.loads(path.read_text(encoding="utf-8"))
             self.assertEqual(saved["providers"]["home"]["model"], "m")
+
+    def test_the_notification_settings_round_trip(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "foo-ai.toml"
+            save_notify_settings(path, enabled=True, topic="foo-desk")
+            self.assertEqual(load_notify_settings(path), {"enabled": True, "topic": "foo-desk"})
+            save_page_settings(path, thinking=True, verbose=False, yes=False)
+            kept = tomllib.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(kept["notify"], {"enabled": True, "topic": "foo-desk"})
+            self.assertTrue(kept["page"]["thinking"])
+            save_notify_settings(path, enabled=False, topic="foo-desk")
+            self.assertEqual(
+                load_notify_settings(path), {"enabled": False, "topic": "foo-desk"}
+            )
+            self.assertTrue(load_page_settings(path)["thinking"])
+
+    def test_a_broken_notification_table_does_not_stop_a_launch(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "foo-ai.toml"
+            path.write_text(
+                '[notify]\nenabled = "yes"\ntopic = "has space"\nextra = "keep"\n',
+                encoding="utf-8",
+                newline="\n",
+            )
+            self.assertEqual(load_notify_settings(path), {"enabled": False, "topic": ""})
+            save_notify_settings(path, enabled=True, topic="foo-desk")
+            kept = tomllib.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(kept["notify"]["extra"], "keep")
+            self.assertEqual(kept["notify"]["topic"], "foo-desk")
+            path.write_text("notify = true\n", encoding="utf-8", newline="\n")
+            with self.assertRaises(ConfigError) as caught:
+                load_notify_settings(path)
+            self.assertIn(str(path), str(caught.exception))
+            self.assertIn("notify must be a table", str(caught.exception))
+        self.assertEqual(load_notify_settings(None), {"enabled": False, "topic": ""})
 
     def test_a_missing_settings_file_leaves_the_options_off(self):
         with tempfile.TemporaryDirectory() as folder:

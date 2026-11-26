@@ -46,7 +46,8 @@ anything is served, exactly as in the CLI.
 The page has a top bar, a left pane, the stage, and a right pane.
 
 - **Top bar**: the two panel buttons, the brand and its prompt mark, the context
-  meter for the last round, and the status light: `ready`, `working`,
+  meter for the latest context line, including one a skill printed with its
+  `[name] ` prefix, and the status light: `ready`, `working`,
   `approval`, `question`, or `error`. Each panel button draws a panel with its
   outer edge marked: the left one hides the left pane, the right one hides the
   activity pane. The stage keeps its room either way.
@@ -123,6 +124,12 @@ are still on after a restart; `--show-thinking`, `--verbose`, and `--yes` turn
 one on for the run that names it. The step budget is shown under Session in the
 left pane.
 
+The same sheet has a **Notification** block under the provider. It turns on a
+phone message through ntfy.sh and holds the topic the phone subscribes to. A
+blank topic makes a new three-word one that the field then shows, so the phone
+can be subscribed to it. When a message is sent, and the POST itself, are
+specified in [Notification](notification.md).
+
 A table that already has `extra_body` keeps it, apart from the block the sheet
 edited: a reasoning save writes the whole body the request sends, so a body the
 launch file set keeps its other keys. The key is
@@ -158,7 +165,7 @@ The page is a document plus a small JSON API. Every write is a `POST` with
 | --- | --- |
 | `GET /` | The document. |
 | `GET /static/<file>` | `styles.css`, `app.js`, and `favicon.svg` from the package. |
-| `GET /api/state` | Workspace, provider, providers, the settings file, step budget, skills, MCP lines, session facts, toggles, and the last context line. The provider carries `api_key_set`, never the key, and `chat_template_kwargs`, or `null` for a provider that sends no local reasoning block. |
+| `GET /api/state` | Workspace, provider, providers, the settings file, step budget, skills, MCP lines, session facts, toggles, the notification, and the last context line. The provider carries `api_key_set`, never the key, and `chat_template_kwargs`, or `null` for a provider that sends no local reasoning block. `notify` carries `enabled` and `topic`. |
 | `GET /api/history` | The resumed transcript, one object per stored message. |
 | `GET /api/events?after=N` | The events after sequence `N`, the status, the pending command, and the last context line. |
 | `GET /api/browse?path=DIR` | The folders under one directory, for the workspace picker: `{"ok": true, "path": "...", "parent": "..." or null, "entries": [{"name": "...", "path": "..."}]}`. No `path` reads the open workspace, a file path names its own folder, and a path that is not there answers `{"ok": false, "error": "no such folder: ..."}`. |
@@ -168,6 +175,8 @@ The page is a document plus a small JSON API. Every write is a `POST` with
 | `POST /api/cancel` | Stops the running request. |
 | `POST /api/approve` | `{"approve": true}` answers a waiting shell command. |
 | `POST /api/settings` | `{"thinking": ..., "verbose": ..., "yes": ...}` sets the toggles. |
+| `POST /api/notify` | `{"enabled": true, "topic": "..."}` writes the phone notification. A blank topic while enabled makes a new three-word one. See [Notification](notification.md). |
+| `POST /api/notify/test` | Sends the test message to the stored topic and waits for ntfy.sh. |
 | `POST /api/provider` | `{"name": "..."}` switches provider while idle. |
 | `POST /api/provider/save` | `{"name": "...", "base_url": "...", "model": "...", "context_window": N, "api_key": "...", "chat_template_kwargs": {"reasoning_effort": "...", "thinking": true}}` writes that provider to the settings file and switches to it. An absent `api_key` keeps the stored key, and `""` clears it. An absent `chat_template_kwargs` keeps the body as it is, and a provider that sends none refuses one. |
 | `POST /api/workspace` | `{"path": "..."}` loads another workspace while idle. |
@@ -186,8 +195,8 @@ A refused request answers `{"ok": false, "error": "..."}`. The page polls
 | `reasoning` | A chunk of `reasoning_content`, only while `thinking` is on. |
 | `tool_name` | A tool call started. |
 | `tool_result` | A tool result, with `name`, `chars`, and `full`. |
-| `status` | A status line, including the context line of a round. |
-| `notice` | A startup line: skill skips, the session note, MCP lines, the banner. |
+| `status` | A status line, including the context line of a round. A skill's line keeps its `[name] ` prefix. A context line carries `usage`, and that is what moves the meter. |
+| `notice` | A startup line: skill skips, the session note, MCP lines, the banner. Also a notification that failed to send. |
 | `confirm`, `confirm_done` | A shell command waits for an answer, and it was answered. |
 | `ask`, `ask_done` | The `ask` tool waits for a choice, and it was answered. |
 | `todos` | The task list `todo_write` wrote, as `content` and `status` pairs. |
@@ -230,9 +239,9 @@ The settings file is a `foo-ai.toml` the page owns. It is read after the launch
 file, so the values the sheet shows are the values a request sends, and it is
 written whole and atomically, private to the user where the platform has file
 modes. It carries `workspace` for the folder the page opened last,
-`default_provider`, `[providers.*]`, and `[page]` for the turn
-options, and nothing else: MCP servers and the step budget belong to the launch
-file and the workspace. A packaged app needs it because the install directory has
+`default_provider`, `[providers.*]`, `[page]` for the turn
+options, and `[notify]` for the phone notification, and nothing else: MCP
+servers and the step budget belong to the launch file and the workspace. A packaged app needs it because the install directory has
 no `foo-ai.toml` of its own, and a user cannot write to that directory anyway.
 
 ## Security
@@ -252,6 +261,9 @@ The page can run shell commands, so the server is narrow on purpose.
   picker needs them. It is a read for the page, so the `Host` check guards it,
   and it changes nothing the agent may read or write: the tools stay inside the
   open workspace.
+- A notification is a POST to `https://ntfy.sh/<topic>` only. The topic is
+  checked before that request is built, so the page cannot aim it at another
+  host. A redirect is not followed.
 
 ## The desktop window
 

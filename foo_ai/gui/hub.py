@@ -13,6 +13,11 @@ does not answer it. Stop cancels the turn instead of choosing.
 
 ``todo_write`` emits ``kind: "todos"`` with a ``todos`` list of ``content`` and
 ``status``. ``GET /api/state`` returns the same list as ``todos``.
+
+A notification, when ``[notify]`` is on, posts to ntfy.sh once per moment: the
+request finished, it failed, a shell command is waiting, or ``ask`` is waiting.
+The POST runs on its own thread. A failure is a ``notice`` and does not fail
+the request. See ``docs/notification.md``.
 """
 
 from __future__ import annotations
@@ -28,13 +33,17 @@ from foo_ai.config import (
     ConfigError,
     known_providers,
     load_config,
+    load_notify_settings,
     load_page_settings,
     local_reasoning,
     merge_reasoning,
+    save_notify_settings,
     save_page_settings,
     save_page_workspace,
+    valid_topic,
     write_provider_settings,
 )
+from foo_ai.gui.notify import NotifyError, compose, post_ntfy, question_text, random_topic
 from foo_ai.mcp import McpPool
 from foo_ai.session import Session
 from foo_ai.skill import load_skills, match_slash, system_prompt
@@ -47,8 +56,11 @@ _WAIT = 0.1
 _READ_TIMEOUT = 300.0
 # ``save_provider`` reads this as "the key in the file stays as it is".
 KEEP_KEY = object()
+# A skill round prefixes its status with ``[name] ``. That line is still the
+# latest context, so the meter follows it the same way the activity log does.
 _USAGE = re.compile(
-    r"^context (?P<used>[0-9.]+[KM]?)(?:/(?P<window>[0-9.]+[KM]?))?"
+    r"^(?:\[[^\]\n]+\] )?"
+    r"context (?P<used>[0-9.]+[KM]?)(?:/(?P<window>[0-9.]+[KM]?))?"
     r" · usage total (?P<prompt>\d+) (?P<completion>\d+)"
     r"(?: · cache (?P<cache>[0-9.]+)%)?$"
 )
@@ -164,10 +176,15 @@ class _HubSink:
         line = text.strip()
         if line == "":
             return
-        self.hub._emit("status", line)
         usage = usage_from_line(line)
-        if usage is not None:
-            self.hub._usage = usage
+        # The poll copies the log and the meter under one lock. Publish the
+        # new total before the line is visible, or the page can draw the line
+        # and keep the previous total.
+        with self.hub._lock:
+            if usage is not None:
+                self.hub._usage = usage
+            extra = {"usage": usage} if usage is not None else {}
+            self.hub._emit("status", line, **extra)
 
     def todos(self, items: list[dict]) -> None:
         copied = [dict(item) for item in items]
@@ -221,17 +238,23 @@ class Hub:
         self._question: dict | None = None
         self._todos: list[dict] = []
         self._usage: dict | None = None
+        self.notify_enabled = False
+        self.notify_topic = ""
+        self.notify_send = post_ntfy
 
     # ------------------------------------------------------------- lifecycle
 
     def start(self) -> None:
         """Load the configuration, start the MCP servers, and read the session."""
         page = load_page_settings(self.user_config)
+        notify = load_notify_settings(self.user_config)
         # A launch flag turns an option on for this run; the saved value keeps
         # the ones no flag named. Both only ever turn an option on.
         self.thinking = self.thinking or page["thinking"]
         self.verbose = self.verbose or page["verbose"]
         self.yes = self.yes or page["yes"]
+        self.notify_enabled = notify["enabled"] is True
+        self.notify_topic = str(notify["topic"])
         self._build()
         for line in self.skipped:
             self._emit("notice", line.strip())
@@ -382,6 +405,7 @@ class Hub:
                 "verbose": self.verbose,
                 "thinking": self.thinking,
                 "yes": self.yes,
+                "notify": {"enabled": self.notify_enabled, "topic": self.notify_topic},
                 "usage": self._usage,
                 "todos": [dict(item) for item in self._todos],
             }
@@ -463,27 +487,38 @@ class Hub:
             self._question = None
             self._emit("user", prompt)
             self._emit("start", "")
-            worker = threading.Thread(target=self._work, args=(call,), name="foo-ai-request")
+            worker = threading.Thread(
+                target=self._work, args=(call, prompt), name="foo-ai-request"
+            )
             worker.daemon = True
             self._worker = worker
         worker.start()
         return {"ok": True}
 
-    def _work(self, call) -> None:
+    def _work(self, call, prompt: str) -> None:
+        outcome = "ready"
+        detail = prompt
         try:
             call()
         except Cancelled:
             self._emit("status", "Interrupted.")
+            outcome = ""
         except ChatError as exc:
-            self._emit("error", str(exc))
+            detail = str(exc)
+            self._emit("error", detail)
+            outcome = "error"
         except Exception as exc:
-            self._emit("error", f"{type(exc).__name__}: {exc}")
+            detail = f"{type(exc).__name__}: {exc}"
+            self._emit("error", detail)
+            outcome = "error"
         finally:
             with self._lock:
                 self.status = "idle"
                 self._worker = None
                 self._approval = None
                 self._question = None
+            if outcome:
+                self._notify(outcome, detail)
             self._emit("done", "")
 
     def cancel(self) -> dict:
@@ -520,6 +555,7 @@ class Hub:
         with self._lock:
             self._approval = pending
             self.status = "approving"
+        self._notify("approval", command)
         self._emit("confirm", command)
         try:
             while not pending["event"].wait(_WAIT):
@@ -568,6 +604,7 @@ class Hub:
         with self._lock:
             self._question = pending
             self.status = "asking"
+        self._notify("question", question_text(questions))
         self._emit("ask", "", questions=pending["questions"])
         try:
             while not pending["event"].wait(_WAIT):
@@ -606,6 +643,69 @@ class Hub:
             self.thinking = wanted["thinking"]
             self.yes = wanted["yes"]
             return {"ok": True, **wanted}
+
+    def set_notify(self, enabled: bool, topic: str) -> dict:
+        """Write ``[notify]``.
+
+        A blank topic on an enabled save makes a new three-word one. The field
+        holds the stored topic when the sheet opens, so a blank field is a
+        deliberate clear.
+        """
+        topic = topic.strip()
+        if topic and not valid_topic(topic):
+            return {
+                "ok": False,
+                "error": "topic must be 1 to 64 letters, digits, underscores, or dashes",
+            }
+        if self.user_config is None:
+            return {"ok": False, "error": "there is no settings file to write"}
+        with self._lock:
+            if enabled and topic == "":
+                topic = random_topic()
+            try:
+                save_notify_settings(self.user_config, enabled=enabled, topic=topic)
+            except ConfigError as exc:
+                return {"ok": False, "error": str(exc)}
+            self.notify_enabled = enabled
+            self.notify_topic = topic
+            return {"ok": True, "enabled": enabled, "topic": topic}
+
+    def send_test(self) -> dict:
+        """Post the test message and wait for ntfy.sh."""
+        with self._lock:
+            if not self.notify_enabled:
+                return {"ok": False, "error": "notification is off"}
+            if not self.notify_topic:
+                return {"ok": False, "error": "notification has no topic"}
+            topic = self.notify_topic
+            send = self.notify_send
+        title, message, tag = compose("test", "")
+        try:
+            send(topic, title, message, tag)
+        except NotifyError as exc:
+            return {"ok": False, "error": f"notification failed: {exc}"}
+        except Exception:
+            return {"ok": False, "error": "notification failed"}
+        return {"ok": True}
+
+    def _notify(self, kind: str, text: str) -> None:
+        """Start one ntfy.sh POST. The request does not wait for it."""
+        with self._lock:
+            if not self.notify_enabled or not self.notify_topic:
+                return
+            topic = self.notify_topic
+            send = self.notify_send
+        title, message, tag = compose(kind, text)
+
+        def run() -> None:
+            try:
+                send(topic, title, message, tag)
+            except NotifyError as exc:
+                self._emit("notice", f"notification failed: {exc}")
+            except Exception:
+                self._emit("notice", "notification failed")
+
+        threading.Thread(target=run, name="foo-ai-notify", daemon=True).start()
 
     def set_provider(self, name: str) -> dict:
         name = name.strip()

@@ -304,6 +304,16 @@ class Handler(BaseHTTPRequestHandler):
                     yes=body.get("yes") if isinstance(body.get("yes"), bool) else None,
                 )
             )
+        if path == "/api/notify":
+            enabled = body.get("enabled")
+            topic = body.get("topic", "")
+            if not isinstance(enabled, bool):
+                return self._json({"ok": False, "error": "enabled must be true or false"})
+            if not isinstance(topic, str):
+                return self._json({"ok": False, "error": "topic must be a string"})
+            return self._json(hub.set_notify(enabled, topic))
+        if path == "/api/notify/test":
+            return self._json(hub.send_test())
         if path == "/api/provider":
             return self._json(hub.set_provider(_text(body.get("name"))))
         if path == "/api/provider/save":

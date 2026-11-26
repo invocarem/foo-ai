@@ -7,6 +7,7 @@ import copy
 import json
 import math
 import os
+import re
 import tempfile
 import tomllib
 from dataclasses import dataclass, field
@@ -617,6 +618,61 @@ def load_page_settings(path: Path | None) -> dict[str, bool]:
         if isinstance(table.get(key), bool):
             settings[key] = table[key]
     return settings
+
+
+_TOPIC = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+
+
+def valid_topic(topic: str) -> bool:
+    """A ntfy topic: 1 to 64 letters, digits, underscores, or dashes."""
+    return _TOPIC.fullmatch(topic) is not None
+
+
+def load_notify_settings(path: Path | None) -> dict[str, bool | str]:
+    """``enabled`` and ``topic`` from the page's ``[notify]`` table.
+
+    A missing file, or a missing table, leaves the setting off and the topic
+    empty. Only the boolean ``true`` turns it on. A topic that is not 1 to 64
+    letters, digits, underscores, or dashes counts as empty, so a hand-edited
+    file never stops a launch.
+    """
+    settings: dict[str, bool | str] = {"enabled": False, "topic": ""}
+    if path is None:
+        return settings
+    try:
+        present = path.is_file()
+    except OSError as exc:
+        raise ConfigError(f"cannot read {path}: {exc}") from None
+    if not present:
+        return settings
+    data = _read_settings(path)
+    table = data.get("notify")
+    if table is None:
+        return settings
+    if not isinstance(table, dict):
+        raise ConfigError(f"{path}: notify must be a table")
+    if table.get("enabled") is True:
+        settings["enabled"] = True
+    topic = table.get("topic")
+    if isinstance(topic, str) and valid_topic(topic):
+        settings["topic"] = topic
+    return settings
+
+
+def save_notify_settings(path: Path, *, enabled: bool, topic: str) -> None:
+    """Write ``[notify]``, keeping every other table and any extra key."""
+    try:
+        present = path.is_file()
+    except OSError as exc:
+        raise ConfigError(f"cannot read {path}: {exc}") from None
+    data = _read_settings(path) if present else {}
+    table = data.get("notify")
+    if not isinstance(table, dict):
+        table = {}
+    table["enabled"] = bool(enabled)
+    table["topic"] = topic
+    data["notify"] = table
+    _write_settings(path, data)
 
 
 def save_page_settings(path: Path, *, thinking: bool, verbose: bool, yes: bool) -> None:

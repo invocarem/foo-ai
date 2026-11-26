@@ -42,6 +42,8 @@ const settingsKeyClear = $('settings-key-clear');
 const settingsReasoning = $('settings-reasoning');
 const settingsEffort = $('settings-effort');
 const settingsThinkingParam = $('settings-thinking-param');
+const notifyEnabled = $('settings-notify-enabled');
+const notifyTopic = $('settings-notify-topic');
 
 const state = {
   seq: 0,
@@ -61,6 +63,7 @@ const state = {
   thinking: false,
   verbose: false,
   yes: false,
+  notify: { enabled: false, topic: '' },
   confirmCommand: '',
   questions: [],
   lastEventAt: null,
@@ -552,6 +555,10 @@ function handle(event) {
     case 'status':
     case 'notice':
       logActivity(event.kind, event.text || '');
+      if (event.usage) {
+        state.usage = event.usage;
+        renderMeter();
+      }
       break;
     case 'confirm':
       showConfirm(event.text || '', event.auto === true);
@@ -1038,6 +1045,9 @@ function applyState(data) {
   state.thinking = data.thinking === true;
   state.verbose = data.verbose === true;
   state.yes = data.yes === true;
+  state.notify = data.notify && typeof data.notify === 'object'
+    ? { enabled: data.notify.enabled === true, topic: data.notify.topic || '' }
+    : { enabled: false, topic: '' };
   state.status = data.status || 'idle';
   if (Array.isArray(data.todos)) renderTodos(data.todos);
 
@@ -1223,6 +1233,9 @@ function fillProviderForm() {
     ? block.reasoning_effort
     : '';
   settingsThinkingParam.checked = block !== null && block.thinking === true;
+  const notify = state.notify || { enabled: false, topic: '' };
+  notifyEnabled.checked = notify.enabled === true;
+  notifyTopic.value = notify.topic || '';
 }
 
 function openSettings() {
@@ -1262,6 +1275,42 @@ async function saveProviderSettings() {
     await loadState();
     closeSettings();
     toast(`Provider ${saved.provider.name} saved.`, 'ok');
+  } catch (error) {
+    toast(String(error.message || error), 'bad');
+  } finally {
+    setBusy(false);
+  }
+}
+
+async function saveNotifySettings() {
+  setBusy(true, 'saving notification…');
+  try {
+    const saved = await postJson('/api/notify', {
+      enabled: notifyEnabled.checked,
+      topic: notifyTopic.value.trim(),
+    });
+    if (!saved.ok) throw new Error(saved.error || 'the notification was refused');
+    state.notify = { enabled: saved.enabled === true, topic: saved.topic || '' };
+    notifyEnabled.checked = state.notify.enabled;
+    notifyTopic.value = state.notify.topic;
+    toast(state.notify.enabled ? 'Notification on.' : 'Notification off.', 'ok');
+    return saved;
+  } catch (error) {
+    toast(String(error.message || error), 'bad');
+    return null;
+  } finally {
+    setBusy(false);
+  }
+}
+
+async function testNotify() {
+  const saved = await saveNotifySettings();
+  if (!saved) return;
+  setBusy(true, 'sending a test…');
+  try {
+    const result = await postJson('/api/notify/test', {});
+    if (!result.ok) throw new Error(result.error || 'the test was refused');
+    toast('Test sent.', 'ok');
   } catch (error) {
     toast(String(error.message || error), 'bad');
   } finally {
@@ -1348,6 +1397,14 @@ function wire() {
   $('settings-scrim').addEventListener('click', closeSettings);
   $('settings-form').addEventListener('submit', (event) => event.preventDefault());
   $('settings-provider-save').addEventListener('click', saveProviderSettings);
+  $('settings-notify-save').addEventListener('click', saveNotifySettings);
+  $('settings-notify-test').addEventListener('click', testNotify);
+  notifyTopic.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter' && !event.isComposing) {
+      event.preventDefault();
+      saveNotifySettings();
+    }
+  });
   /* Enter in a provider field saves that provider. */
   for (const field of [settingsBaseUrl, settingsModel, settingsWindow, settingsKey, settingsEffort]) {
     field.addEventListener('keydown', (event) => {

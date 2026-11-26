@@ -22,3 +22,5 @@ Truncation markers use the single character `…` (U+2026), not three periods.
 Python 3.11 or newer. The running program has no third-party dependencies. Parse TOML with the standard-library `tomllib` module. Do not add a retry of a failed model call, parallel tool execution, or a special case for any one MCP server. The one added tool is `run_skill`, specified in [Skills](skills.md). A new playbook is a skill file, not a new tool.
 
 [GUI](gui.md) is an addition beside that fixed behavior, not part of it. `python -m foo_ai.gui` serves one HTML document on the loopback interface and drives the same agent, with the same transcript file and the same tools. The CLI's flags, printed text, and exit codes are unchanged.
+
+[Notification](notification.md) is an addition beside the page. When it is on, the page posts to ntfy.sh so a phone subscribed to the topic can show that a request finished, failed, or is waiting. The CLI does not send one.

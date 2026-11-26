@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import http.client
+import io
 import json
 import os
 import socket
@@ -16,12 +17,31 @@ import unittest
 import urllib.error
 import urllib.parse
 import urllib.request
+from email.message import EmailMessage
 from pathlib import Path
+from unittest import mock
 
 from foo_ai.client import ChatError, Client, Completion
-from foo_ai.config import ConfigError, Provider, known_providers, load_page_workspace, save_page_workspace
+from foo_ai.config import (
+    ConfigError,
+    Provider,
+    known_providers,
+    load_page_workspace,
+    save_page_workspace,
+    valid_topic,
+)
 from foo_ai.gui.hub import Hub, usage_from_line
+from foo_ai.gui.notify import (
+    NotifyError,
+    _RefuseRedirect,
+    compose,
+    one_line,
+    post_ntfy,
+    question_text,
+    random_topic,
+)
 from foo_ai.gui.server import STATIC, build_parser, make_server, resolve_workspace
+from foo_ai.gui.words import WORDS
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -180,9 +200,20 @@ class UsageLineTests(unittest.TestCase):
         self.assertEqual(usage["fraction"], 0.0)
         self.assertIsNone(usage["cache"])
 
+    def test_a_skill_context_line_is_a_context_line(self):
+        usage = usage_from_line(
+            "[explore] context 132.1K/1M · usage total 132100 8 · cache 90.00%"
+        )
+        self.assertEqual(usage["used"], "132.1K")
+        self.assertEqual(usage["window"], "1M")
+        self.assertEqual(usage["prompt"], 132100)
+        self.assertEqual(usage["completion"], 8)
+        self.assertAlmostEqual(usage["fraction"], 0.1321, places=4)
+
     def test_another_line_is_not_a_context_line(self):
         self.assertIsNone(usage_from_line("Summarizing earlier turns."))
         self.assertIsNone(usage_from_line("context nonsense"))
+        self.assertIsNone(usage_from_line("[explore] Summarizing earlier turns."))
 
 
 class KnownProvidersTests(unittest.TestCase):
@@ -326,6 +357,12 @@ class GuiServerTests(unittest.TestCase):
         status, body = request(self.base, "/static/app.js")
         self.assertEqual(status, 200)
         self.assertIn(b"/api/events", body)
+        self.assertIn(b"/api/notify", body)
+        self.assertIn(b"event.usage", body)
+        status, body = request(self.base, "/")
+        self.assertEqual(status, 200)
+        self.assertIn(b"Notification", body)
+        self.assertIn(b"ntfy.sh", body)
         status, body = request(self.base, "/favicon.svg")
         self.assertEqual(status, 200)
         self.assertIn(b"<svg", body)
@@ -356,6 +393,26 @@ class GuiServerTests(unittest.TestCase):
         self.assertIn("home", state["providers"])
         self.assertEqual(state["status"], "idle")
         self.assertFalse(state["yes"])
+        self.assertEqual(state["notify"], {"enabled": False, "topic": ""})
+
+    def test_a_skill_context_line_moves_the_meter(self):
+        self.hub.sink.status("\ncontext 58.4K/1M · usage total 58400 10\n")
+        self.hub.sink.status(
+            "\n[explore] context 132.1K/1M · usage total 132100 8 · cache 90.00%\n"
+        )
+        self.hub.sink.status("\n[explore] Summarizing earlier turns.\n")
+        state = get_json(self.base, "/api/state")
+        self.assertEqual(state["usage"]["used"], "132.1K")
+        self.assertEqual(state["usage"]["window"], "1M")
+        payload = get_json(self.base, "/api/events?after=0")
+        self.assertEqual(payload["usage"]["used"], "132.1K")
+        context = [
+            event
+            for event in payload["events"]
+            if event["text"].startswith("[explore] context")
+        ]
+        self.assertEqual(context[-1]["usage"]["used"], "132.1K")
+        self.assertNotIn("usage", payload["events"][-1])
 
     def test_history_is_empty_before_the_first_request(self):
         self.assertEqual(get_json(self.base, "/api/history"), {"messages": []})
@@ -1204,6 +1261,230 @@ class GuiServerTests(unittest.TestCase):
             connection.close()
 
 
+
+    # --------------------------------------------------------- notification
+
+    def install_notify(self, send=None):
+        sent = []
+        arrived = threading.Event()
+
+        def record(topic, title, message, tag):
+            if send is not None:
+                send(topic, title, message, tag)
+            sent.append({"topic": topic, "title": title, "message": message, "tag": tag})
+            arrived.set()
+
+        self.hub.notify_send = record
+        return sent, arrived
+
+    def test_a_blank_topic_makes_a_three_word_topic(self):
+        status, body = request(self.base, "/api/notify", {"enabled": True, "topic": "  "})
+        self.assertEqual(status, 200)
+        saved = json.loads(body)
+        self.assertTrue(saved["ok"])
+        self.assertTrue(saved["enabled"])
+        made = saved["topic"]
+        self.assertRegex(made, r"^foo-ai-[a-z-]+$")
+        self.assertLessEqual(len(made), 64)
+        self.assertEqual(
+            get_json(self.base, "/api/state")["notify"],
+            {"enabled": True, "topic": made},
+        )
+        stored = tomllib.loads(self.settings.read_text(encoding="utf-8"))
+        self.assertEqual(stored["notify"]["topic"], made)
+        self.assertTrue(stored["notify"]["enabled"])
+
+        # The field holds the stored topic, so a blank field is a deliberate
+        # clear, and it makes another topic.
+        status, body = request(self.base, "/api/notify", {"enabled": True, "topic": ""})
+        second = json.loads(body)["topic"]
+        self.assertNotEqual(second, made)
+        self.assertRegex(second, r"^foo-ai-[a-z-]+$")
+        self.assertEqual(
+            tomllib.loads(self.settings.read_text(encoding="utf-8"))["notify"]["topic"], second
+        )
+
+        other = Hub(
+            self.workspace,
+            client_factory=lambda provider: self.client,
+            user_config=self.settings,
+        )
+        other.start()
+        try:
+            self.assertEqual(other.state()["notify"]["topic"], second)
+            self.assertTrue(other.state()["notify"]["enabled"])
+        finally:
+            other.close()
+
+        status, body = request(self.base, "/api/notify", {"enabled": False, "topic": second})
+        self.assertEqual(json.loads(body), {"ok": True, "enabled": False, "topic": second})
+        status, body = request(self.base, "/api/notify", {"enabled": False, "topic": ""})
+        self.assertEqual(json.loads(body), {"ok": True, "enabled": False, "topic": ""})
+
+    def test_a_bad_topic_is_refused_and_the_file_stays(self):
+        self.assertTrue(self.hub.set_notify(True, "foo-kept")["ok"])
+        status, body = request(self.base, "/api/notify", {"enabled": True, "topic": "has space"})
+        self.assertEqual(status, 200)
+        refused = json.loads(body)
+        self.assertFalse(refused["ok"])
+        self.assertIn("topic must be 1 to 64", refused["error"])
+        self.assertEqual(self.hub.notify_topic, "foo-kept")
+        status, body = request(self.base, "/api/notify", {"enabled": "yes", "topic": "foo-kept"})
+        self.assertEqual(json.loads(body)["error"], "enabled must be true or false")
+        status, body = request(self.base, "/api/notify", {"enabled": True, "topic": 4})
+        self.assertEqual(json.loads(body)["error"], "topic must be a string")
+        self.assertEqual(self.hub.notify_topic, "foo-kept")
+
+    def test_notification_can_be_saved_while_a_request_waits(self):
+        self.client.rounds = [tool_call("shell", {"command": "echo hi"}), answer("fine")]
+        request(self.base, "/api/ask", {"text": "run it"})
+        poll(self.base, lambda seen: any(event["kind"] == "confirm" for event in seen))
+        status, body = request(self.base, "/api/notify", {"enabled": True, "topic": "foo-kept"})
+        self.assertEqual(status, 200)
+        self.assertTrue(json.loads(body)["ok"])
+        self.hub.cancel()
+        poll(self.base, finished)
+
+    def test_a_page_without_a_settings_file_refuses_notification(self):
+        other = Hub(self.workspace, client_factory=lambda provider: self.client)
+        other.start()
+        try:
+            result = other.set_notify(True, "")
+        finally:
+            other.close()
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"], "there is no settings file to write")
+
+    def test_a_finished_request_texts_the_prompt(self):
+        sent, arrived = self.install_notify()
+        self.assertTrue(self.hub.set_notify(True, "foo-desk")["ok"])
+        self.client.rounds = [answer("hello there")]
+        request(self.base, "/api/ask", {"text": "  hello\nthere  "})
+        poll(self.base, finished)
+        self.assertTrue(arrived.wait(5))
+        self.assertEqual(sent, [{
+            "topic": "foo-desk",
+            "title": "Foo AI is ready",
+            "message": "hello there",
+            "tag": "white_check_mark",
+        }])
+
+    def test_a_long_prompt_is_cut(self):
+        sent, arrived = self.install_notify()
+        self.hub.set_notify(True, "foo-desk")
+        prompt = "x" * 200
+        self.client.rounds = [answer("ok")]
+        request(self.base, "/api/ask", {"text": prompt})
+        poll(self.base, finished)
+        self.assertTrue(arrived.wait(5))
+        self.assertEqual(sent[0]["message"], "x" * 159 + "…")
+        self.assertEqual(len(sent[0]["message"]), 160)
+
+    def test_notification_stays_quiet_until_it_is_on(self):
+        sent, _arrived = self.install_notify()
+        self.client.rounds = [answer("hello")]
+        request(self.base, "/api/ask", {"text": "hi"})
+        poll(self.base, finished)
+        self.assertEqual(sent, [])
+
+    def test_an_error_texts_the_error_and_not_ready(self):
+        sent, arrived = self.install_notify()
+        self.hub.set_notify(True, "foo-desk")
+        self.client.rounds = [ChatError("HTTP 401 from nowhere: nope")]
+        request(self.base, "/api/ask", {"text": "hi"})
+        poll(self.base, finished)
+        self.assertTrue(arrived.wait(5))
+        self.assertEqual(sent, [{
+            "topic": "foo-desk",
+            "title": "Foo AI hit an error",
+            "message": "HTTP 401 from nowhere: nope",
+            "tag": "warning",
+        }])
+
+    def test_a_waiting_command_texts_and_a_stop_does_not_add_ready(self):
+        sent, arrived = self.install_notify()
+        self.hub.set_notify(True, "foo-desk")
+        self.client.rounds = [tool_call("shell", {"command": "echo hi"}), answer("never")]
+        request(self.base, "/api/ask", {"text": "run it"})
+        poll(self.base, lambda seen: any(event["kind"] == "confirm" for event in seen))
+        self.assertTrue(arrived.wait(5))
+        self.hub.cancel()
+        poll(self.base, finished)
+        self.assertEqual([item["title"] for item in sent], ["Foo AI needs approval"])
+        self.assertEqual(sent[0]["message"], "echo hi")
+        self.assertEqual(sent[0]["tag"], "hourglass_flowing_sand")
+
+    def test_auto_approve_texts_ready_and_not_the_command(self):
+        sent, arrived = self.install_notify()
+        self.hub.set_notify(True, "foo-desk")
+        self.hub.set_settings(yes=True)
+        self.client.rounds = [tool_call("shell", {"command": "echo hi"}), answer("fine")]
+        request(self.base, "/api/ask", {"text": "run it"})
+        poll(self.base, finished)
+        self.assertTrue(arrived.wait(5))
+        self.assertEqual([item["title"] for item in sent], ["Foo AI is ready"])
+
+    def test_a_question_texts_before_the_answer(self):
+        sent, arrived = self.install_notify()
+        self.hub.set_notify(True, "foo-desk")
+        questions = [
+            {
+                "header": "Library",
+                "question": "Which library?",
+                "options": [
+                    {"label": "requests", "description": "small"},
+                    {"label": "httpx"},
+                ],
+            }
+        ]
+        self.client.rounds = [tool_call("ask", {"questions": questions}), answer("Using httpx.")]
+        request(self.base, "/api/ask", {"text": "pick one"})
+        poll(self.base, lambda seen: any(event["kind"] == "ask" for event in seen))
+        self.assertTrue(arrived.wait(5))
+        self.assertEqual(sent[0]["title"], "Foo AI has a question")
+        self.assertEqual(sent[0]["message"], "Which library?")
+        self.assertEqual(sent[0]["tag"], "question")
+        arrived.clear()
+        request(self.base, "/api/answer", {"answers": [{"id": "q1", "selected": ["httpx"]}]})
+        poll(self.base, finished)
+        self.assertTrue(arrived.wait(5))
+        self.assertEqual(sent[1]["title"], "Foo AI is ready")
+        self.assertEqual(sent[1]["message"], "pick one")
+
+    def test_a_failed_send_is_a_notice_and_the_request_still_finishes(self):
+        def boom(topic, title, message, tag):
+            raise NotifyError("HTTP 429")
+
+        self.hub.notify_send = boom
+        self.hub.set_notify(True, "foo-secret")
+        self.client.rounds = [answer("hello there")]
+        request(self.base, "/api/ask", {"text": "hi"})
+        _data, events = poll(
+            self.base,
+            lambda seen: finished(seen)
+            and any(event.get("text") == "notification failed: HTTP 429" for event in seen),
+        )
+        self.assertNotIn("foo-secret", " ".join(event.get("text") or "" for event in events))
+        content = "".join(event["text"] for event in events if event["kind"] == "content")
+        self.assertEqual(content, "hello there")
+
+    def test_the_test_message_uses_the_stored_topic(self):
+        sent, _arrived = self.install_notify()
+        status, body = request(self.base, "/api/notify/test", {})
+        self.assertEqual(json.loads(body), {"ok": False, "error": "notification is off"})
+        self.assertEqual(sent, [])
+        self.hub.set_notify(True, "foo-desk")
+        status, body = request(self.base, "/api/notify/test", {})
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body), {"ok": True})
+        self.assertEqual(sent, [{
+            "topic": "foo-desk",
+            "title": "Foo AI",
+            "message": "Foo AI can reach this phone.",
+            "tag": "white_check_mark",
+        }])
+
+
 class GuiCommandLineTests(unittest.TestCase):
     def test_the_config_flag_is_accepted(self):
         args = build_parser().parse_args(["--config", "settings/foo-ai.toml"])
@@ -1396,6 +1677,119 @@ class GuiCommandLineTests(unittest.TestCase):
                 except subprocess.TimeoutExpired:  # pragma: no cover - defensive
                     proc.kill()
                     proc.communicate()
+
+class NotifyMessageTests(unittest.TestCase):
+    """The message shape and the topic, with no server and no ntfy.sh."""
+
+    def test_a_made_topic_joins_three_distinct_words(self):
+        with mock.patch("foo_ai.gui.notify.WORDS", ("one", "two", "three", "four")):
+            made = random_topic()
+        self.assertTrue(made.startswith("foo-ai-"))
+        words = made[len("foo-ai-") :].split("-")
+        self.assertEqual(len(words), 3)
+        self.assertEqual(len(set(words)), 3)
+        for word in words:
+            self.assertIn(word, {"one", "two", "three", "four"})
+
+    def test_a_made_topic_is_valid_and_never_the_same(self):
+        made = random_topic()
+        self.assertTrue(valid_topic(made))
+        self.assertRegex(made, r"^foo-ai-[a-z-]+$")
+        self.assertLessEqual(len(made), 64)
+        self.assertNotEqual(random_topic(), made)
+
+    def test_the_word_list_is_topic_safe(self):
+        self.assertEqual(len(WORDS), 1296)
+        self.assertEqual(len(set(WORDS)), len(WORDS))
+        for word in WORDS:
+            self.assertRegex(word, r"^[a-z-]{3,8}$")
+
+    def test_questions_join_in_order(self):
+        self.assertEqual(
+            question_text(
+                [
+                    {"question": "First?"},
+                    {"question": " Second? "},
+                    {"question": ""},
+                    {"question": 3},
+                ]
+            ),
+            "First? · Second?",
+        )
+
+    def test_a_blank_body_uses_the_title(self):
+        title, message, tag = compose("error", "  \n  ")
+        self.assertEqual(title, "Foo AI hit an error")
+        self.assertEqual(message, title)
+        self.assertEqual(tag, "warning")
+        self.assertEqual(one_line("  a\nb  "), "a b")
+
+    def test_the_post_names_ntfy_and_keeps_the_topic_out_of_an_error(self):
+        class Response:
+            def read(self):
+                return b"ok"
+
+            def close(self):
+                return None
+
+        class Opener:
+            def __init__(self):
+                self.request = None
+                self.timeout = None
+
+            def open(self, request, timeout):
+                self.request = request
+                self.timeout = timeout
+                return Response()
+
+        opener = Opener()
+        with mock.patch("foo_ai.gui.notify.urllib.request.build_opener", return_value=opener):
+            post_ntfy("foo-abc", "Foo AI is ready", "hello", "white_check_mark")
+        self.assertEqual(opener.request.full_url, "https://ntfy.sh/foo-abc")
+        self.assertEqual(opener.request.data, b"hello")
+        self.assertEqual(opener.request.get_method(), "POST")
+        self.assertEqual(opener.request.get_header("Title"), "Foo AI is ready")
+        self.assertEqual(opener.request.get_header("Priority"), "high")
+        self.assertEqual(opener.request.get_header("Tags"), "white_check_mark")
+        self.assertEqual(opener.timeout, 10.0)
+
+        def refuse(request, timeout):
+            raise urllib.error.HTTPError(
+                request.full_url,
+                429,
+                "nope",
+                EmailMessage(),
+                io.BytesIO(b"foo-secret"),
+            )
+
+        opener.open = refuse
+        with mock.patch("foo_ai.gui.notify.urllib.request.build_opener", return_value=opener):
+            with self.assertRaises(NotifyError) as caught:
+                post_ntfy("foo-secret", "Foo AI", "hello", "white_check_mark")
+        self.assertEqual(str(caught.exception), "HTTP 429")
+        self.assertNotIn("foo-secret", str(caught.exception))
+
+        def down(request, timeout):
+            raise urllib.error.URLError("https://ntfy.sh/foo-secret timed out")
+
+        opener.open = down
+        with mock.patch("foo_ai.gui.notify.urllib.request.build_opener", return_value=opener):
+            with self.assertRaises(NotifyError) as caught:
+                post_ntfy("foo-secret", "Foo AI", "hello", "white_check_mark")
+        self.assertEqual(str(caught.exception), "the notification server did not answer")
+        self.assertNotIn("foo-secret", str(caught.exception))
+
+        with self.assertRaises(NotifyError) as caught:
+            post_ntfy("bad topic", "Foo AI", "hello", "warning")
+        self.assertEqual(str(caught.exception), "notification has no topic")
+
+    def test_a_redirect_is_a_failure(self):
+        with self.assertRaises(NotifyError) as caught:
+            _RefuseRedirect().redirect_request(
+                None, None, 302, "Found", {}, "https://evil.example/foo-secret"
+            )
+        self.assertEqual(str(caught.exception), "HTTP 302")
+        self.assertNotIn("foo-secret", str(caught.exception))
 
 
 if __name__ == "__main__":

@@ -190,6 +190,21 @@
             <div class="row">
               <button class="ghost" id="settings-provider-save" type="button">Save provider</button>
             </div>
+            <div class="sheet-split" id="settings-notify">
+              <h3>Notification</h3>
+              <p class="sheet-note">When a request finishes, or it waits for you, Foo AI posts to
+                <b>ntfy.sh</b>. Subscribe to the topic in the ntfy app. The topic is the
+                password: anyone who knows it can read the message. A blank topic makes a new
+                three-word one, shown here after the save.</p>
+              <label class="check"><input type="checkbox" id="settings-notify-enabled"><span>notify me</span></label>
+              <label class="sheet-field"><span>topic</span>
+                <input id="settings-notify-topic" type="text" spellcheck="false" autocomplete="off" placeholder="leave blank to make one">
+              </label>
+              <div class="row">
+                <button class="ghost" id="settings-notify-save" type="button">Save notification</button>
+                <button class="ghost" id="settings-notify-test" type="button">Send test</button>
+              </div>
+            </div>
           </section>
         </div>
         <footer class="sheet-foot">

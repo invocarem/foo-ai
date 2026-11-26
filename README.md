@@ -57,6 +57,8 @@ That serves the same agent as a page on the loopback interface and opens it in a
 
 The page has a workspace pane, the transcript, and an activity pane. The answer streams into the transcript, each tool call is a card whose result stays folded, reasoning is a folded `thinking` block, and a shell command opens an amber bar with `Deny` and `Run`. A question from the `ask` tool opens a popup with its options and a line for your own answer, and the `todo_write` list shows in the left pane with a progress bar. Reloading the page shows that list again. The provider can be switched while idle and configured in settings, where its base URL, model, and API key are saved to a settings file of the page's own, beside the turn options; the local provider also edits its `chat_template_kwargs` reasoning fields there, and a cloud provider has none; the workspace can be opened from the page, or browsed for with its `Browse…` picker. `/reset`, `/exit`, and a loaded skill as `/name arguments` work as they do at the prompt. Everything is served by the standard library: the program still has no third-party packages.
 
+Settings can also turn on a phone notification through [ntfy.sh](https://ntfy.sh). The page makes a three-word topic when you leave the field blank and shows it, so subscribe to that topic in the ntfy app, and the phone is told when a request finishes, fails, or is waiting for an approval or a question. See [docs/notification.md](docs/notification.md).
+
 `desktop/` wraps that page in an Electron window with a hidden title bar, so it opens as a desktop app rather than a tab:
 
 ```sh
