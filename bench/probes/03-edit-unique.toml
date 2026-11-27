@@ -1,0 +1,55 @@
+# The obvious `old_string` matches twice, and both functions have the same two
+# body lines, so only the `def` line tells them apart. A short `old_string` is
+# what `edit_file` answers with "old_string matched 2 times". The read is seeded,
+# so the round starts where the loop would be after reading the file.
+prompt = """
+Only the one in `monthly_total` should return `monthly` instead. Leave the
+other one as it is.
+"""
+
+note = "An old_string that matches twice: only the def line tells the functions apart."
+
+[[history]]
+tool = "glob"
+arguments = { pattern = "**/*.py" }
+result = "src/app.py\nsrc/report.py"
+
+[[history]]
+tool = "read_file"
+arguments = { path = "src/report.py" }
+result = """\
+1|def daily_total(rows):
+2|    total = sum(rows)
+3|    return total
+4|
+5|
+6|def monthly_total(rows):
+7|    total = sum(rows)
+8|    return total
+[8 lines shown, 8 total]\
+"""
+
+[[history]]
+tool = "grep"
+arguments = { pattern = "monthly_total", path = "." }
+result = "src/report.py:6:def monthly_total(rows):"
+
+[[history]]
+tool = "read_file"
+arguments = { path = "src/app.py" }
+result = """\
+1|def parse(line):
+2|    if line == "":
+3|        return None
+4|    return int(line)
+[4 lines shown, 4 total]\
+"""
+
+[expect]
+tool = "edit_file"
+forbid = ["write_file", "shell", "read_file"]
+
+[expect.args]
+path = "src/report.py"
+old_string = 're:^\s*\S[^\n]*\n\s*\S'
+new_string = 're:monthly'

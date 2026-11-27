@@ -1,0 +1,30 @@
+# An existing file with one line to change, and the read seeded: the round
+# starts where the loop would be after reading it, so the text is already in the
+# transcript and the next call should be the edit. `write_file` is the plausible
+# wrong answer, because it replaces the whole file.
+prompt = """
+It returns None for an empty line; make it return 0 instead. Change only that
+line.
+"""
+
+note = "write_file where edit_file is right: a file that exists, one line changed."
+
+[[history]]
+tool = "read_file"
+arguments = { path = "src/app.py" }
+result = """\
+1|def parse(line):
+2|    if line == "":
+3|        return None
+4|    return int(line)
+[4 lines shown, 4 total]\
+"""
+
+[expect]
+tool = "edit_file"
+forbid = ["write_file", "read_file"]
+
+[expect.args]
+path = "src/app.py"
+old_string = 're:return\s+None'
+new_string = 're:return\s+0'

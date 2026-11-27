@@ -1,0 +1,37 @@
+# Nothing here decides this, so the agent has to ask instead of guessing, and the
+# search is seeded so the round starts after it already looked: no cache code
+# turned up. The payload is scored by the asker's own validator, so it has to be
+# one the sheet can actually show: a header, a question, and 2 to 4 options.
+prompt = """
+I want a cache in front of `parse` in src/app.py. There is no cache code here
+yet, and I have not picked a backend. Ask me what you need before you write
+anything.
+"""
+
+note = "A decision the workspace cannot settle, with a payload the sheet must be able to show."
+
+[[history]]
+tool = "list_dir"
+arguments = { path = "." }
+result = "src/"
+
+[[history]]
+tool = "read_file"
+arguments = { path = "src/app.py" }
+result = """\
+1|def parse(line):
+2|    if line == "":
+3|        return None
+4|    return int(line)
+[4 lines shown, 4 total]\
+"""
+
+[[history]]
+tool = "grep"
+arguments = { pattern = "cache", path = "." }
+result = "[no matches]"
+
+[expect]
+tool = "ask"
+forbid = ["shell", "write_file", "edit_file", "read_file", "list_dir", "grep"]
+check = "questions"

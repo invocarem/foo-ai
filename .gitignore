@@ -16,6 +16,9 @@ __pycache__/
 # Setuptools metadata (e.g. foo_ai.egg-info/).
 *.egg-info/
 
+# Bench run output. The probes are committed; a report is not.
+bench/results/
+
 # Editor swap files, which can hold a copy of foo-ai.toml.
 *.swp
 

@@ -1,0 +1,11 @@
+# The control probe. One obvious tool and one required argument, and the check
+# is loose on purpose: a failure here points at the endpoint or the provider
+# block, not at the model.
+prompt = "Show me the first 40 lines of src/app.py."
+note = "The control: a failure here means the endpoint, not the model."
+
+[expect]
+tool = "read_file"
+
+[expect.args]
+path = "src/app.py"

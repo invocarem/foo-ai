@@ -1,0 +1,16 @@
+# The skill schema is only in the set when skills load, so this probe also
+# proves the wiring: `explore` and `review` are the builtin skills. A subagent
+# skill needs arguments, because that text is the only task it sees.
+prompt = """
+Before I commit, run the review skill on the uncommitted change in src/app.py.
+"""
+
+note = "Reading the files itself where the review skill was named, or a skill call with no arguments."
+
+[expect]
+tool = "run_skill"
+forbid = ["read_file", "shell", "edit_file", "grep"]
+
+[expect.args]
+name = "review"
+arguments = 're:\S'
